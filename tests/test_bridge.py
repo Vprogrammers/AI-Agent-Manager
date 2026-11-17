@@ -29,12 +29,17 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(manager.limit_summary('claude', '{"error":"bad request"}', ''))
 
     def test_safe_claude_rejection_requires_zero_work(self):
-        base = {'is_error': True, 'num_turns': 0, 'duration_api_ms': 0,
+        base = {'is_error': True, 'num_turns': 0, 'duration_api_ms': 4300,
                 'total_cost_usd': 0, 'usage': {'input_tokens': 0, 'output_tokens': 0}}
         self.assertTrue(manager.safe_claude_rejection(json.dumps(base)))
-        for change in ({'num_turns': 1}, {'duration_api_ms': 5},
-                       {'total_cost_usd': 0.1}, {'usage': {'input_tokens': 1}},
-                       {'usage': {}}, {'is_error': False}):
+        self.assertTrue(manager.safe_claude_rejection(json.dumps({
+            **base, 'duration_api_ms': 4371, 'usage': {},
+            'result': 'Usage limit reached'})))
+        self.assertTrue(manager.safe_claude_rejection(json.dumps({
+            **base, 'duration_api_ms': 2000, 'usage': {'input_tokens': 0}})))
+        for change in ({'num_turns': 1}, {'total_cost_usd': 0.1},
+                       {'usage': {'input_tokens': 1}}, {'is_error': False},
+                       {'usage': {'input_tokens': None}}):
             self.assertFalse(manager.safe_claude_rejection(json.dumps({**base, **change})))
         self.assertFalse(manager.safe_claude_rejection('not json'))
 
@@ -43,7 +48,7 @@ class BridgeTests(unittest.TestCase):
             with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
                  patch.object(manager, 'repository_snapshot', return_value=('head', 'clean')):
                 payload = json.dumps({'is_error': True, 'result': 'Usage limit reached',
-                                      'num_turns': 0, 'duration_api_ms': 0,
+                                      'num_turns': 0, 'duration_api_ms': 4300,
                                       'total_cost_usd': 0, 'usage': {'input_tokens': 0}})
                 def runner(cmd, **kwargs):
                     return CompletedProcess(cmd, 1, payload, '')
@@ -56,7 +61,7 @@ class BridgeTests(unittest.TestCase):
             with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
                  patch.object(manager, 'repository_snapshot', side_effect=[('head', 'before'), ('head', 'after')]):
                 payload = json.dumps({'is_error': True, 'result': 'Usage limit reached',
-                                      'num_turns': 0, 'duration_api_ms': 0,
+                                      'num_turns': 0, 'duration_api_ms': 4300,
                                       'total_cost_usd': 0, 'usage': {'input_tokens': 0}})
                 def runner(cmd, **kwargs):
                     return CompletedProcess(cmd, 1, payload, '')

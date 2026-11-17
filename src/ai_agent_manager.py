@@ -224,14 +224,14 @@ def safe_claude_rejection(stdout):
         return False
     if not isinstance(obj, dict) or obj.get('is_error') is not True:
         return False
-    if obj.get('num_turns') != 0 or obj.get('duration_api_ms') != 0:
+    if obj.get('num_turns') != 0:
         return False
-    if obj.get('total_cost_usd') != 0:
+    if obj.get('total_cost_usd', 0) != 0:
         return False
-    usage = obj.get('usage')
-    if not isinstance(usage, dict) or not usage:
+    usage = obj.get('usage', {})
+    if not isinstance(usage, dict):
         return False
-    return all(type(value) is int and value == 0 for value in usage.values())
+    return all(type(value) in (int, float) and value == 0 for value in usage.values())
 
 
 def run_turn(root, tool, prompt, state, env=None, runner=None):
