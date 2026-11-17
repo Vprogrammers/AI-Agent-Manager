@@ -188,14 +188,15 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     env = os.environ if env is None else env
     runner = stream_runner if runner is None else runner
     sessions = state.setdefault('sessions', {})
-    sid = sessions.get(tool)
+    profile = choose_profile(prompt, env.get('AAM_CODEX_PROFILE', 'coding')) if tool == 'codex' else 'default'
+    session_key = f'{tool}:{profile}' if tool == 'codex' else tool
+    sid = sessions.get(session_key)
     previous = state.get('last_tool')
-    switched = previous is not None and previous != tool
+    switched = previous is not None and previous != tool and not sid
     actual_prompt = (handoff(root, state) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
     model = model_for(tool, prompt, env)
     cmd = build_command(tool, model, sid, actual_prompt)
     start = time.monotonic()
-    profile = choose_profile(prompt, env.get('AAM_CODEX_PROFILE', 'default')) if tool == 'codex' else 'default'
     if tool == 'codex':
         print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
     with profile_environment(profile, env) as runtime_env:
@@ -213,7 +214,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     new_sid, answer = parse_result(tool, completed.stdout)
     if sid and new_sid != sid:
         raise RuntimeError('Unexpected native session ID change; state was not saved')
-    sessions[tool] = new_sid
+    sessions[session_key] = new_sid
     state['last_tool'] = tool
     state.setdefault('history', []).append({'tool': tool, 'prompt': prompt[:2500], 'answer': answer[:3500], 'utc': datetime.now(timezone.utc).isoformat()})
     state['history'] = state['history'][-4:]

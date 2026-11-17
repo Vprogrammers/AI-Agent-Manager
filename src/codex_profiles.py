@@ -15,15 +15,22 @@ def profile_environment(profile, base=None):
     if profile in ("default", "full"):
         yield env
         return
-    with tempfile.TemporaryDirectory(prefix="aam-codex-") as directory:
-        home = Path(directory)
-        auth = Path.home() / ".codex" / "auth.json"
-        if auth.is_file():
-            shutil.copy2(auth, home / "auth.json")
-            (home / "auth.json").chmod(0o600)
-        (home / "config.toml").write_text("")
-        env["CODEX_HOME"] = str(home)
-        yield env
+    # Keep native sessions across turns without modifying global ~/.codex.
+    base = Path(env.get("AAM_PROFILE_HOME", str(Path.home() / ".local" / "state" / "ai-agent-manager" / "codex")))
+    home = base / profile
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    home.chmod(0o700)
+    auth = Path.home() / ".codex" / "auth.json"
+    target = home / "auth.json"
+    if auth.is_file() and (not target.exists() or auth.stat().st_mtime_ns > target.stat().st_mtime_ns):
+        shutil.copy2(auth, target)
+        target.chmod(0o600)
+    config = home / "config.toml"
+    if not config.exists():
+        config.write_text("")
+        config.chmod(0o600)
+    env["CODEX_HOME"] = str(home)
+    yield env
 
 def choose_profile(prompt, requested="auto"):
     if requested != "auto":

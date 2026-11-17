@@ -40,5 +40,33 @@ class BridgeTests(unittest.TestCase):
                 entry=json.loads((pathlib.Path(d)/'usage.jsonl').read_text().strip())
                 self.assertEqual(entry['duration_seconds'], 1.5)
 
+    def test_profile_home_persists(self):
+        import sys
+        sys.path.insert(0, str(FILE.parent))
+        from codex_profiles import profile_environment
+        with tempfile.TemporaryDirectory() as d:
+            env = {'AAM_PROFILE_HOME': d}
+            with profile_environment('coding', env) as first:
+                home = pathlib.Path(first['CODEX_HOME'])
+                (home / 'session-marker').write_text('persisted')
+            with profile_environment('coding', env) as second:
+                self.assertEqual(second['CODEX_HOME'], str(home))
+                self.assertEqual((home / 'session-marker').read_text(), 'persisted')
+            with profile_environment('minimal', env) as third:
+                self.assertNotEqual(third['CODEX_HOME'], str(home))
+    def test_codex_session_scoped_by_profile(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'):
+                state = {'sessions': {'codex:coding': 'existing'}}
+                output = '\n'.join([
+                    json.dumps({'type': 'thread.started', 'thread_id': 'existing'}),
+                    json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'OK'}}),
+                ])
+                def runner(cmd, **kwargs):
+                    self.assertEqual(cmd[2:4], ['resume', 'existing'])
+                    return CompletedProcess(cmd, 0, output, '')
+                manager.run_turn(pathlib.Path(d), 'codex', 'fix code', state, {}, runner)
+                self.assertEqual(state['sessions']['codex:coding'], 'existing')
+
 if __name__ == '__main__':
     unittest.main()
