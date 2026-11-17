@@ -135,7 +135,7 @@ def record_usage(root, tool, model, seconds, usage, status):
              'model': model, 'duration_seconds': round(seconds, 3),
              'status': status, 'usage': usage}
     with log.open('a', encoding='utf-8') as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + '\\n')
+        f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
 def stream_runner(cmd, cwd, tool, model):
