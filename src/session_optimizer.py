@@ -51,12 +51,15 @@ def write_checkpoint(path, state, cfg):
         'last_tool': state.get('last_tool'),
         'sessions': state.get('sessions', {}),
         'completed_turns': state.get('completed_turns', 0),
+        'last_completed': state.get('last_completed'),
+        'session_models': state.get('session_models', {}),
         'recent_turns': [{'tool': x.get('tool'), 'prompt': x.get('prompt', '')[:cfg['summary_chars']],
                           'answer': x.get('answer', '')[:cfg['summary_chars']]} for x in history],
         'note': 'Deterministic bounded excerpt, not a semantic summary. Verify Git state before resuming.'
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix('.tmp')
+    import uuid
+    tmp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
     os.replace(tmp, path)
 
@@ -94,3 +97,11 @@ def cache_policy(state, tool, profile, prompt, env):
         return None
     key = f'{tool}:{profile}' if tool == 'codex' else tool
     return state.get('sessions', {}).get(key)
+
+
+def load_checkpoint(path):
+    try:
+        data = json.loads(Path(path).read_text())
+        return data if isinstance(data, dict) and isinstance(data.get('sessions'), dict) else None
+    except (OSError, ValueError):
+        return None

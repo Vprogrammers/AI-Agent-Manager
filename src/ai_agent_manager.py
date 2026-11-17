@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from codex_profiles import choose_profile, profile_environment
-from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint
+from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint, load_checkpoint
+from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -90,7 +91,7 @@ def parse_result(tool, output):
         raise ValueError('Codex did not return thread ID')
     return sid, '\n'.join(messages)
 
-def handoff(root, state):
+def handoff(root, state, recipient=None):
     """Transfer explicit recorded messages plus actual Git facts, never invented decisions."""
     branch = git(root, 'branch', '--show-current')
     status = git(root, 'status', '--short')[:4000]
@@ -98,7 +99,6 @@ def handoff(root, state):
     staged = git(root, 'diff', '--cached', '--stat')[:2000]
     issue_file = root / '.ai-agent-manager' / 'HANDOFF.md'
     issue_text = issue_file.read_text(errors='replace')[-3000:] if issue_file.is_file() else 'No project handoff file found.'
-    history = state.get('history', [])[-2:]
     return ('CROSS-AGENT HANDOFF: You are continuing work from a DIFFERENT AI CLI. '
             'The other provider session ID cannot be resumed here. Review repository state before any changes. '
             'Do not repeat potentially completed side-effecting operations. '
@@ -107,7 +107,7 @@ def handoff(root, state):
             f'Working tree:\n{status or "clean"}\nDiff stat:\n{diff}\nStaged stat:\n{staged}\n'
             f'Issue handoff:\n{issue_text}\n'
             'Recent explicit turns (may be truncated; verify against files):\n'
-            + compact_history(state, optimization_settings(os.environ)))
+            + handoff_delta(state, recipient, optimization_settings(os.environ)))
 
 def usage_from_output(tool, output):
     """Extract provider-reported usage; never invent missing token counts."""
@@ -124,66 +124,24 @@ def usage_from_output(tool, output):
         try:
             obj = json.loads(output)
             usage = obj.get('usage') or {}
-            return {k: usage.get(k) for k in ('input_tokens', 'cache_read_input_tokens', 'output_tokens') if isinstance(usage.get(k), int)}
+            return {k: usage.get(k) for k in ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'output_tokens') if isinstance(usage.get(k), int)}
         except json.JSONDecodeError:
             pass
     return {}
 
 
-def record_usage(root, tool, model, seconds, usage, status, profile='default'):
+def record_usage(root, tool, model, seconds, usage, status, profile='default', task=None):
     log = store_path(root).with_name('usage.jsonl')
     log.parent.mkdir(parents=True, exist_ok=True)
     entry = {'utc': datetime.now(timezone.utc).isoformat(), 'provider': tool,
              'model': model, 'duration_seconds': round(seconds, 3),
-             'status': status, 'profile': profile, 'usage': usage}
+             'status': status, 'profile': profile, 'task': task, 'usage': usage}
     with log.open('a', encoding='utf-8') as f:
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
 def stream_runner(cmd, cwd, tool, model, env=None):
-    """Stream progress from JSONL events, keeping stdout parseable and memory bounded."""
-    start = time.monotonic()
-    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, bufsize=1,
-                            start_new_session=True)
-    stdout_lines = []
-    errors = deque(maxlen=40)
-    def read_stderr():
-        for line in proc.stderr:
-            errors.append(line)
-    thread = threading.Thread(target=read_stderr, daemon=True)
-    thread.start()
-    try:
-        for line in proc.stdout:
-            stdout_lines.append(line)
-            if tool == 'codex':
-                try:
-                    obj = json.loads(line)
-                    event = obj.get('type', '')
-                    if event.startswith('item.') or event.startswith('turn.'):
-                        item = obj.get('item') or {}
-                        kind = item.get('type', event)
-                        print(f'[aam] {tool}/{model}: {event} {kind} ({time.monotonic()-start:.1f}s)', file=sys.stderr, flush=True)
-                except json.JSONDecodeError:
-                    pass
-        rc = proc.wait()
-    except KeyboardInterrupt:
-        print('[aam] Interrupt requested; stopping active CLI process group.', file=sys.stderr)
-        os.killpg(proc.pid, signal.SIGINT)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-        raise InterruptedError('Request interrupted; inspect Git changes before retrying')
-    finally:
-        thread.join(timeout=2)
-    return subprocess.CompletedProcess(cmd, rc, ''.join(stdout_lines), ''.join(errors))
-
+    return bounded_stream_runner(cmd, cwd, tool, model, env)
 
 def limit_summary(tool, stdout, stderr):
     """Return a short, safe provider-limit message without exposing raw JSON."""
@@ -210,12 +168,11 @@ class ProviderLimitError(RuntimeError):
 
 
 def repository_snapshot(root):
-    """Detect changes across the failed request, including untracked files."""
-    return (git(root, 'rev-parse', 'HEAD'),
-            git(root, 'status', '--porcelain=v1', '--untracked-files=all'),
-            git(root, 'diff', '--binary'),
-            git(root, 'diff', '--cached', '--binary'))
-
+    try:
+        return repository_fingerprint(root)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as e:
+        print(f'[aam] Repository verification unavailable: {e}', file=sys.stderr)
+        return ('unverified', uuid.uuid4().hex)
 
 def claude_rejection_reason(stdout):
     """Return a non-sensitive reason when automatic replay is unsafe."""
@@ -268,9 +225,9 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     session_key = f'{tool}:{profile}' if tool == 'codex' else tool
     sid = cache_policy(state, tool, profile, prompt, env)
     previous = state.get('last_tool')
-    switched = previous is not None and previous != tool and not sid
-    actual_prompt = (handoff(root, state) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
-    model = model_for(tool, prompt, env)
+    switched = previous is not None and previous != tool
+    actual_prompt = (handoff(root, state, tool) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
+    model = model_for_session(state, session_key, sid, model_for(tool, prompt, env))
     cmd = build_command(tool, model, sid, actual_prompt)
     before = repository_snapshot(root) if tool == 'claude' else None
     start = time.monotonic()
@@ -283,7 +240,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
-    record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed', profile)
+    record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed', profile, env.get('AAM_TASK_ID'))
     print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
     if completed.returncode:
         summary = limit_summary(tool, completed.stdout, completed.stderr)
@@ -304,9 +261,11 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     if sid and new_sid != sid:
         raise RuntimeError('Unexpected native session ID change; state was not saved')
     sessions[session_key] = new_sid
+    state.setdefault('session_models', {})[session_key] = model
     state['last_tool'] = tool
     state.setdefault('history', []).append({'tool': tool, 'prompt': prompt[:2500], 'answer': answer[:3500], 'utc': datetime.now(timezone.utc).isoformat()})
-    state['history'] = state['history'][-4:]
+    state['history'] = state['history'][-12:]
+    state['last_completed'] = {'tool': tool, 'session_id': new_sid, 'utc': datetime.now(timezone.utc).isoformat()}
     warning = after_turn(state, tool, usage, env, store_path(root).with_name('checkpoint.json'))
     if warning:
         print('[aam] Context warning: observed input tokens exceeded threshold; consider /checkpoint and /new when safe.', file=sys.stderr)
@@ -369,6 +328,10 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        if prompt == '/recover':
+            recovered = load_checkpoint(path.with_name('checkpoint.json'))
+            print(json.dumps(recovered or {'error': 'No valid checkpoint'}, ensure_ascii=False, indent=2))
+            continue
         if prompt == '/analytics':
             print(json.dumps(analytics(path.with_name('usage.jsonl')), indent=2))
             continue
