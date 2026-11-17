@@ -56,7 +56,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_realistic_limit_rejection_with_nonzero_duration(self):
         with tempfile.TemporaryDirectory() as d:
-            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \\
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
                  patch.object(manager, 'repository_snapshot', return_value=('head', 'clean')):
                 payload = json.dumps({'type': 'result', 'is_error': True,
                                       'result': 'Usage limit reached',
