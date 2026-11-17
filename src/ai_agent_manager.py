@@ -271,6 +271,18 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
         print('[aam] Context warning: observed input tokens exceeded threshold; consider /checkpoint and /new when safe.', file=sys.stderr)
     return answer, model or 'CLI default'
 
+def show_agent_ready(tool, root, clear=False):
+    """Show the active provider without changing non-interactive output."""
+    if not sys.stdout.isatty():
+        return
+    if clear and os.environ.get('AAM_NO_CLEAR') != '1':
+        print('\\033[2J\\033[H', end='', flush=True)
+    print(f'AI-Agent-Manager | {tool.upper()} READY')
+    print(f'Project: {root}')
+    print('Commands: /claude /codex /new /status /context /analytics /checkpoint /recover /exit')
+    print('-' * 64, flush=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('tool', choices=['claude', 'codex'])
@@ -287,13 +299,16 @@ def main():
         p.error(f'{ns.tool} executable not found')
     state = {} if ns.new or not path.exists() else json.loads(path.read_text())
     tool = ns.tool
-    print('[aam] Per-turn model selection; /claude, /codex, /new, /status, /exit; shared Git handoff.', file=sys.stderr)
+    show_agent_ready(tool, root, clear=ns.prompt is None)
+    if not sys.stdout.isatty():
+        print('[aam] Agent ready: ' + tool, file=sys.stderr)
     def execute(prompt):
         nonlocal tool
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
             tool = pending
             print(f'[aam] Automatically switching to {tool} after previous limit', file=sys.stderr)
+            show_agent_ready(tool, root)
         for attempt in range(2):
             try:
                 answer, model = run_turn(root, tool, prompt, state)
@@ -309,6 +324,7 @@ def main():
                                 and e.safe_retry and tool == 'claude'):
                             print('[aam] Claude rejected before execution. Switching to Codex; retrying the same request once.', file=sys.stderr)
                             tool = other
+                            show_agent_ready(tool, root)
                             continue
                         print(f'[aam] Next request uses {other}; automatic retry blocked because prior work cannot be ruled out.', file=sys.stderr)
                     else:
@@ -349,6 +365,7 @@ def main():
             state.clear()
             save(path, state)
             print('[aam] New bridge session (native session references cleared)', file=sys.stderr)
+            show_agent_ready(tool, root, clear=True)
             continue
         if prompt == '/status':
             print(json.dumps({'agent': tool, 'sessions': list(state.get('sessions', {})), 'last_tool': state.get('last_tool'), 'pending_switch': state.get('pending_switch')}, ensure_ascii=False))
@@ -361,6 +378,7 @@ def main():
                 tool = candidate
                 state.pop('pending_switch', None)
                 print(f'[aam] Next turn uses {tool}', file=sys.stderr)
+                show_agent_ready(tool, root)
             continue
         if prompt:
             execute(prompt)
