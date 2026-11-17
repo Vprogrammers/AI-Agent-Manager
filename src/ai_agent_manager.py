@@ -202,6 +202,38 @@ def limit_summary(tool, stdout, stderr):
     return result
 
 
+class ProviderLimitError(RuntimeError):
+    def __init__(self, summary, safe_retry=False):
+        super().__init__(summary)
+        self.safe_retry = safe_retry
+
+
+def repository_snapshot(root):
+    """Detect changes across the failed request, including untracked files."""
+    return (git(root, 'rev-parse', 'HEAD'),
+            git(root, 'status', '--porcelain=v1', '--untracked-files=all'),
+            git(root, 'diff', '--binary'),
+            git(root, 'diff', '--cached', '--binary'))
+
+
+def safe_claude_rejection(stdout):
+    """Only retry when Claude explicitly reports zero work and zero usage."""
+    try:
+        obj = json.loads(stdout)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(obj, dict) or obj.get('is_error') is not True:
+        return False
+    if obj.get('num_turns') != 0 or obj.get('duration_api_ms') != 0:
+        return False
+    if obj.get('total_cost_usd') != 0:
+        return False
+    usage = obj.get('usage')
+    if not isinstance(usage, dict) or not usage:
+        return False
+    return all(type(value) is int and value == 0 for value in usage.values())
+
+
 def run_turn(root, tool, prompt, state, env=None, runner=None):
     env = os.environ if env is None else env
     runner = stream_runner if runner is None else runner
@@ -214,6 +246,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     actual_prompt = (handoff(root, state) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
     model = model_for(tool, prompt, env)
     cmd = build_command(tool, model, sid, actual_prompt)
+    before = repository_snapshot(root) if tool == 'claude' else None
     start = time.monotonic()
     if tool == 'codex':
         print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
@@ -229,12 +262,16 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     if completed.returncode:
         summary = limit_summary(tool, completed.stdout, completed.stderr)
         if summary:
-            raise RuntimeError(summary)
+            safe = (tool == 'claude' and safe_claude_rejection(completed.stdout)
+                    and before == repository_snapshot(root))
+            raise ProviderLimitError(summary, safe_retry=safe)
         detail = (completed.stderr or completed.stdout)[-500:]
         raise RuntimeError(f'{tool} exited {completed.returncode}: {detail}')
     summary = limit_summary(tool, completed.stdout, completed.stderr) if tool == 'claude' else None
     if summary:
-        raise RuntimeError(summary)
+        safe = (safe_claude_rejection(completed.stdout)
+                and before == repository_snapshot(root))
+        raise ProviderLimitError(summary, safe_retry=safe)
     new_sid, answer = parse_result(tool, completed.stdout)
     if sid and new_sid != sid:
         raise RuntimeError('Unexpected native session ID change; state was not saved')
@@ -266,27 +303,33 @@ def main():
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
             tool = pending
-            print(f'[aam] Automatically switching next turn to {tool} after previous limit', file=sys.stderr)
-        try:
-            answer, model = run_turn(root, tool, prompt, state)
-        except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
-            message = str(e)
-            print(f'[aam] {message}', file=sys.stderr)
-            if LIMIT.search(message):
-                other = 'codex' if tool == 'claude' else 'claude'
-                if shutil.which(other):
-                    state['pending_switch'] = other
-                    save(path, state)
-                    print(f'[aam] Limit suspected. Next request automatically routes to {other}. '
-                          'Inspect repository changes before continuing; failed work is NOT retried automatically.', file=sys.stderr)
-                else:
-                    print(f'[aam] Limit suspected; {other} CLI not installed.', file=sys.stderr)
-            return 1
-        state.pop('pending_switch', None)
-        save(path, state)
-        print(f'[aam] {tool} | {model}', file=sys.stderr)
-        print(answer)
-        return 0
+            print(f'[aam] Automatically switching to {tool} after previous limit', file=sys.stderr)
+        for attempt in range(2):
+            try:
+                answer, model = run_turn(root, tool, prompt, state)
+            except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
+                message = str(e)
+                print(f'[aam] {message}', file=sys.stderr)
+                if isinstance(e, ProviderLimitError) or LIMIT.search(message):
+                    other = 'codex' if tool == 'claude' else 'claude'
+                    if shutil.which(other):
+                        state['pending_switch'] = other
+                        save(path, state)
+                        if (attempt == 0 and isinstance(e, ProviderLimitError)
+                                and e.safe_retry and tool == 'claude'):
+                            print('[aam] Claude rejected before execution. Switching to Codex; retrying the same request once.', file=sys.stderr)
+                            tool = other
+                            continue
+                        print(f'[aam] Next request uses {other}; automatic retry blocked because prior work cannot be ruled out.', file=sys.stderr)
+                    else:
+                        print(f'[aam] Limit reached; {other} CLI not installed.', file=sys.stderr)
+                return 1
+            state.pop('pending_switch', None)
+            save(path, state)
+            print(f'[aam] {tool} | {model}', file=sys.stderr)
+            print(answer)
+            return 0
+        return 1
     if ns.prompt is not None:
         return execute(ns.prompt)
     while True:

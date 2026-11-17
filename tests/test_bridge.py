@@ -28,6 +28,42 @@ class BridgeTests(unittest.TestCase):
     def test_nonlimit_failure_remains_error(self):
         self.assertIsNone(manager.limit_summary('claude', '{"error":"bad request"}', ''))
 
+    def test_safe_claude_rejection_requires_zero_work(self):
+        base = {'is_error': True, 'num_turns': 0, 'duration_api_ms': 0,
+                'total_cost_usd': 0, 'usage': {'input_tokens': 0, 'output_tokens': 0}}
+        self.assertTrue(manager.safe_claude_rejection(json.dumps(base)))
+        for change in ({'num_turns': 1}, {'duration_api_ms': 5},
+                       {'total_cost_usd': 0.1}, {'usage': {'input_tokens': 1}},
+                       {'usage': {}}, {'is_error': False}):
+            self.assertFalse(manager.safe_claude_rejection(json.dumps({**base, **change})))
+        self.assertFalse(manager.safe_claude_rejection('not json'))
+
+    def test_safe_limit_raises_retryable_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \\
+                 patch.object(manager, 'repository_snapshot', return_value=('head', 'clean')):
+                payload = json.dumps({'is_error': True, 'result': 'Usage limit reached',
+                                      'num_turns': 0, 'duration_api_ms': 0,
+                                      'total_cost_usd': 0, 'usage': {'input_tokens': 0}})
+                def runner(cmd, **kwargs):
+                    return CompletedProcess(cmd, 1, payload, '')
+                with self.assertRaises(manager.ProviderLimitError) as ctx:
+                    manager.run_turn(pathlib.Path(d), 'claude', 'read md', {}, {}, runner)
+                self.assertTrue(ctx.exception.safe_retry)
+
+    def test_changed_repository_blocks_retry(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \\
+                 patch.object(manager, 'repository_snapshot', side_effect=[('head', 'before'), ('head', 'after')]):
+                payload = json.dumps({'is_error': True, 'result': 'Usage limit reached',
+                                      'num_turns': 0, 'duration_api_ms': 0,
+                                      'total_cost_usd': 0, 'usage': {'input_tokens': 0}})
+                def runner(cmd, **kwargs):
+                    return CompletedProcess(cmd, 1, payload, '')
+                with self.assertRaises(manager.ProviderLimitError) as ctx:
+                    manager.run_turn(pathlib.Path(d), 'claude', 'read md', {}, {}, runner)
+                self.assertFalse(ctx.exception.safe_retry)
+
     def test_codex_usage(self):
         value = manager.usage_from_output('codex', json.dumps({'type':'turn.completed','usage':{'input_tokens':100,'cached_input_tokens':80,'output_tokens':3}}))
         self.assertEqual(value['cached_input_tokens'], 80)
