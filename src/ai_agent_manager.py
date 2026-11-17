@@ -236,7 +236,12 @@ def claude_rejection_reason(stdout):
     usage = obj.get('usage', {})
     if not isinstance(usage, dict):
         return 'invalid usage metadata'
-    if not all(type(value) in (int, float) and value == 0 for value in usage.values()):
+    # Claude usage also contains metadata (e.g. cache_creation dict).
+    # Only token counters indicate billable model work; metadata is not usage.
+    token_fields = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens',
+                    'cache_read_input_tokens')
+    if any(type(usage.get(key, 0)) not in (int, float) or usage.get(key, 0) != 0
+           for key in token_fields):
         return 'Claude reported token usage'
     return None
 

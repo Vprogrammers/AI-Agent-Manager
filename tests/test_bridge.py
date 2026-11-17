@@ -59,6 +59,20 @@ class BridgeTests(unittest.TestCase):
             'is_error': True, 'result': 'Usage limit reached',
             'num_turns': 1, 'usage': {'input_tokens': 0, 'output_tokens': 0}})))
 
+    def test_claude_quota_metadata_does_not_block_zero_token_retry(self):
+        payload = json.dumps({
+            'is_error': True, 'result': 'Usage limit reached',
+            'num_turns': 1, 'total_cost_usd': 0,
+            'usage': {'input_tokens': 0, 'output_tokens': 0,
+                      'cache_read_input_tokens': 0,
+                      'cache_creation': {'ephemeral_1h_input_tokens': 0},
+                      'server_tool_use': {'web_search_requests': 0},
+                      'service_tier': 'standard'}})
+        self.assertIsNone(manager.claude_rejection_reason(payload))
+        self.assertIsNone(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'clean')))
+        self.assertEqual(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'dirty')),
+                         'repository changed during failed request')
+
     def test_real_claude_quota_one_turn_zero_tokens_retries(self):
         with tempfile.TemporaryDirectory() as d:
             with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
