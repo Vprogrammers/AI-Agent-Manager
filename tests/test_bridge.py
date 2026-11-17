@@ -40,7 +40,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_safe_limit_raises_retryable_error(self):
         with tempfile.TemporaryDirectory() as d:
-            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \\
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
                  patch.object(manager, 'repository_snapshot', return_value=('head', 'clean')):
                 payload = json.dumps({'is_error': True, 'result': 'Usage limit reached',
                                       'num_turns': 0, 'duration_api_ms': 0,
@@ -53,7 +53,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_changed_repository_blocks_retry(self):
         with tempfile.TemporaryDirectory() as d:
-            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \\
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
                  patch.object(manager, 'repository_snapshot', side_effect=[('head', 'before'), ('head', 'after')]):
                 payload = json.dumps({'is_error': True, 'result': 'Usage limit reached',
                                       'num_turns': 0, 'duration_api_ms': 0,
