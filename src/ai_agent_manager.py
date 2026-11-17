@@ -276,7 +276,7 @@ def show_agent_ready(tool, root, clear=False):
     if not sys.stdout.isatty():
         return
     if clear and os.environ.get('AAM_NO_CLEAR') != '1':
-        print('\\033[2J\\033[H', end='', flush=True)
+        print('\033[2J\033[H', end='', flush=True)
     print(f'AI-Agent-Manager | {tool.upper()} READY')
     print(f'Project: {root}')
     print('Commands: /claude /codex /new /status /context /analytics /checkpoint /recover /exit')

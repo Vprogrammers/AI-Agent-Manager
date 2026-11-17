@@ -10,6 +10,15 @@ manager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(manager)
 
 class ManagerTests(unittest.TestCase):
+    def test_terminal_clear_uses_escape_sequence(self):
+        from unittest.mock import patch
+        import io
+        output = io.StringIO()
+        with patch.object(manager.sys.stdout, 'isatty', return_value=True), \
+             patch.object(manager.sys, 'stdout', output):
+            manager.show_agent_ready('claude', pathlib.Path('.'), clear=True)
+        self.assertTrue(output.getvalue().startswith(chr(27) + '[2J' + chr(27) + '[H'))
+        self.assertIn('CLAUDE READY', output.getvalue())
     def test_model_routing(self):
         self.assertEqual(manager.model_for('codex', 'fix typo', {'AAM_CODEX_LOW_MODEL': 'small'}), 'small')
         self.assertEqual(manager.model_for('claude', 'security migration', {'AAM_CLAUDE_HIGH_MODEL': 'large'}), 'large')
