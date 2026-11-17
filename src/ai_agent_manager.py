@@ -18,7 +18,7 @@ LIMIT = re.compile(r'rate.limit|usage.limit|quota|too.many.requests|429|overload
 MAX_CONTEXT = 4000
 
 def complexity(prompt):
-    return 'high' if HIGH.search(prompt) else 'medium' if MED.search(prompt) else 'low' if LOW.search(prompt) else 'medium'
+    return 'high' if HIGH.search(prompt) else 'low' if LOW.search(prompt) else 'medium'
 
 def model_for(tool, prompt, env):
     return env.get(f'AAM_{tool.upper()}_{complexity(prompt).upper()}_MODEL', '').strip()
