@@ -30,7 +30,8 @@ class BridgeTests(unittest.TestCase):
 
     def test_safe_claude_rejection_requires_zero_work(self):
         base = {'is_error': True, 'num_turns': 0, 'duration_api_ms': 4300,
-                'total_cost_usd': 0, 'usage': {'input_tokens': 0, 'output_tokens': 0}}
+                'total_cost_usd': 0, 'usage': {'input_tokens': 0, 'output_tokens': 0},
+                'result': 'Usage limit reached'}
         self.assertTrue(manager.safe_claude_rejection(json.dumps(base)))
         self.assertTrue(manager.safe_claude_rejection(json.dumps({
             **base, 'duration_api_ms': 4371, 'usage': {},
@@ -53,7 +54,7 @@ class BridgeTests(unittest.TestCase):
                          'repository changed during failed request')
         self.assertEqual(manager.claude_rejection_reason(json.dumps({
             'is_error': True, 'result': 'Some other error', 'usage': {}})),
-            'missing turn count without explicit quota rejection')
+            'not an explicit quota rejection')
         self.assertIsNone(manager.claude_rejection_reason(json.dumps({
             'is_error': True, 'result': 'Usage limit reached',
             'num_turns': 1, 'usage': {'input_tokens': 0, 'output_tokens': 0}})))
@@ -90,7 +91,7 @@ class BridgeTests(unittest.TestCase):
     def test_retry_diagnostics_distinguish_repository_changes(self):
         payload = json.dumps({'is_error': True, 'num_turns': 0,
                               'duration_api_ms': 3400, 'usage': {},
-                              'total_cost_usd': 0})
+                              'total_cost_usd': 0, 'result': 'Usage limit reached'})
         self.assertIsNone(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'clean')))
         self.assertEqual(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'dirty')),
                          'repository changed during failed request')
