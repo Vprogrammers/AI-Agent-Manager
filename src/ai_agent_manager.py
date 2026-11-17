@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from codex_profiles import choose_profile, profile_environment
+from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -106,7 +107,7 @@ def handoff(root, state):
             f'Working tree:\n{status or "clean"}\nDiff stat:\n{diff}\nStaged stat:\n{staged}\n'
             f'Issue handoff:\n{issue_text}\n'
             'Recent explicit turns (may be truncated; verify against files):\n'
-            + json.dumps(history, ensure_ascii=False)[-MAX_CONTEXT:])
+            + compact_history(state, optimization_settings(os.environ)))
 
 def usage_from_output(tool, output):
     """Extract provider-reported usage; never invent missing token counts."""
@@ -129,12 +130,12 @@ def usage_from_output(tool, output):
     return {}
 
 
-def record_usage(root, tool, model, seconds, usage, status):
+def record_usage(root, tool, model, seconds, usage, status, profile='default'):
     log = store_path(root).with_name('usage.jsonl')
     log.parent.mkdir(parents=True, exist_ok=True)
     entry = {'utc': datetime.now(timezone.utc).isoformat(), 'provider': tool,
              'model': model, 'duration_seconds': round(seconds, 3),
-             'status': status, 'usage': usage}
+             'status': status, 'profile': profile, 'usage': usage}
     with log.open('a', encoding='utf-8') as f:
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
@@ -265,7 +266,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     sessions = state.setdefault('sessions', {})
     profile = choose_profile(prompt, env.get('AAM_CODEX_PROFILE', 'coding')) if tool == 'codex' else 'default'
     session_key = f'{tool}:{profile}' if tool == 'codex' else tool
-    sid = sessions.get(session_key)
+    sid = cache_policy(state, tool, profile, prompt, env)
     previous = state.get('last_tool')
     switched = previous is not None and previous != tool and not sid
     actual_prompt = (handoff(root, state) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
@@ -282,7 +283,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
-    record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed')
+    record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed', profile)
     print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
     if completed.returncode:
         summary = limit_summary(tool, completed.stdout, completed.stderr)
@@ -306,6 +307,9 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     state['last_tool'] = tool
     state.setdefault('history', []).append({'tool': tool, 'prompt': prompt[:2500], 'answer': answer[:3500], 'utc': datetime.now(timezone.utc).isoformat()})
     state['history'] = state['history'][-4:]
+    warning = after_turn(state, tool, usage, env, store_path(root).with_name('checkpoint.json'))
+    if warning:
+        print('[aam] Context warning: observed input tokens exceeded threshold; consider /checkpoint and /new when safe.', file=sys.stderr)
     return answer, model or 'CLI default'
 
 def main():
@@ -365,6 +369,17 @@ def main():
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        if prompt == '/analytics':
+            print(json.dumps(analytics(path.with_name('usage.jsonl')), indent=2))
+            continue
+        if prompt == '/checkpoint':
+            write_checkpoint(path.with_name('checkpoint.json'), state, optimization_settings(os.environ))
+            print('[aam] Local checkpoint saved; native session unchanged.', file=sys.stderr)
+            continue
+        if prompt == '/context':
+            print(json.dumps({'observed_input_tokens': state.get('context_observations', {}),
+                              'note': 'Observed input is not exact active context size.'}, indent=2))
+            continue
         if prompt in ('/exit', '/quit'):
             break
         if prompt == '/new':

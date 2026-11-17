@@ -33,3 +33,8 @@ State is stored under the **target repository's Git directory** in `ai-agent-man
 ## License
 
 MIT.
+
+
+## Session optimization
+
+See [Session optimization](docs/SESSION_OPTIMIZATION.md). Commands: `/context`, `/checkpoint`, `/analytics`.
