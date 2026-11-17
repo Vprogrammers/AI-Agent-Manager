@@ -14,6 +14,20 @@ manager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(manager)
 
 class BridgeTests(unittest.TestCase):
+    def test_claude_limit_is_compact_and_schedules_failover(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'):
+                payload = json.dumps({'is_error': True, 'result': 'Usage limit reached; resets Nov 19 at 10am (Europe/Belgrade)', 'api_error': 'usage_limit_reached', 'private': 'SECRET' * 1000})
+                def runner(cmd, **kwargs):
+                    return CompletedProcess(cmd, 1, payload, '')
+                with self.assertRaisesRegex(RuntimeError, 'Claude \\| LIMIT REACHED') as ctx:
+                    manager.run_turn(pathlib.Path(d), 'claude', 'test', {'sessions': {}}, {}, runner)
+                self.assertNotIn('SECRET', str(ctx.exception))
+                self.assertLess(len(str(ctx.exception)), 160)
+
+    def test_nonlimit_failure_remains_error(self):
+        self.assertIsNone(manager.limit_summary('claude', '{"error":"bad request"}', ''))
+
     def test_codex_usage(self):
         value = manager.usage_from_output('codex', json.dumps({'type':'turn.completed','usage':{'input_tokens':100,'cached_input_tokens':80,'output_tokens':3}}))
         self.assertEqual(value['cached_input_tokens'], 80)

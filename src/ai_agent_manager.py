@@ -184,6 +184,24 @@ def stream_runner(cmd, cwd, tool, model, env=None):
     return subprocess.CompletedProcess(cmd, rc, ''.join(stdout_lines), ''.join(errors))
 
 
+def limit_summary(tool, stdout, stderr):
+    """Return a short, safe provider-limit message without exposing raw JSON."""
+    raw = '\n'.join((stdout or '', stderr or ''))
+    if not LIMIT.search(raw):
+        return None
+    details = raw
+    try:
+        payload = json.loads(stdout)
+        details = str(payload.get('result') or payload.get('error') or raw)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    reset = re.search(r'resets?\s+([^"\\\\\n]+?)(?=[."]|$)', details, re.I)
+    result = f'{tool.capitalize()} | LIMIT REACHED'
+    if reset:
+        result += f' | resets {reset.group(1).strip()}'
+    return result
+
+
 def run_turn(root, tool, prompt, state, env=None, runner=None):
     env = os.environ if env is None else env
     runner = stream_runner if runner is None else runner
@@ -209,8 +227,14 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed')
     print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
     if completed.returncode:
-        detail = (completed.stderr or completed.stdout)[-2000:]
+        summary = limit_summary(tool, completed.stdout, completed.stderr)
+        if summary:
+            raise RuntimeError(summary)
+        detail = (completed.stderr or completed.stdout)[-500:]
         raise RuntimeError(f'{tool} exited {completed.returncode}: {detail}')
+    summary = limit_summary(tool, completed.stdout, completed.stderr) if tool == 'claude' else None
+    if summary:
+        raise RuntimeError(summary)
     new_sid, answer = parse_result(tool, completed.stdout)
     if sid and new_sid != sid:
         raise RuntimeError('Unexpected native session ID change; state was not saved')
