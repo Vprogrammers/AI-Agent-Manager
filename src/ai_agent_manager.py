@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
+from codex_profiles import choose_profile, profile_environment
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -138,10 +139,10 @@ def record_usage(root, tool, model, seconds, usage, status):
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
-def stream_runner(cmd, cwd, tool, model):
+def stream_runner(cmd, cwd, tool, model, env=None):
     """Stream progress from JSONL events, keeping stdout parseable and memory bounded."""
     start = time.monotonic()
-    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, bufsize=1,
                             start_new_session=True)
     stdout_lines = []
@@ -194,10 +195,14 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     model = model_for(tool, prompt, env)
     cmd = build_command(tool, model, sid, actual_prompt)
     start = time.monotonic()
-    if runner is stream_runner:
-        completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default')
-    else:
-        completed = runner(cmd, cwd=str(root), capture_output=True, text=True)
+    profile = choose_profile(prompt, env.get('AAM_CODEX_PROFILE', 'default')) if tool == 'codex' else 'default'
+    if tool == 'codex':
+        print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
+    with profile_environment(profile, env) as runtime_env:
+        if runner is stream_runner:
+            completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default', env=runtime_env)
+        else:
+            completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
     record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed')
