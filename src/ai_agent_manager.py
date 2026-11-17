@@ -224,15 +224,13 @@ def claude_rejection_reason(stdout):
         return 'invalid Claude response'
     if not isinstance(obj, dict) or obj.get('is_error') is not True:
         return 'not an explicit Claude error'
-    turns = obj.get('num_turns')
-    if turns is not None and turns != 0:
-        return 'Claude reported executed turns'
-    if turns is None:
-        # Claude's preflight quota rejection can omit num_turns entirely.
-        # Only permit that shape for an explicit quota error with zero usage.
-        error_text = str(obj.get('result', '')) + ' ' + str(obj.get('api_error', ''))
-        if not LIMIT.search(error_text):
-            return 'missing turn count without explicit quota rejection'
+    # num_turns includes the rejected request itself on some Claude CLI
+    # versions. It is NOT evidence of successful tool execution.
+    # Require an explicit quota error, zero usage/cost and unchanged Git
+    # snapshot instead; never use num_turns as the replay gate.
+    error_text = str(obj.get('result', '')) + ' ' + str(obj.get('api_error', ''))
+    if not LIMIT.search(error_text):
+        return 'not an explicit quota rejection'
     if obj.get('total_cost_usd', 0) != 0:
         return 'Claude reported nonzero cost'
     usage = obj.get('usage', {})

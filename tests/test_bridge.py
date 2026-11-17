@@ -37,7 +37,7 @@ class BridgeTests(unittest.TestCase):
             'result': 'Usage limit reached'})))
         self.assertTrue(manager.safe_claude_rejection(json.dumps({
             **base, 'duration_api_ms': 2000, 'usage': {'input_tokens': 0}})))
-        for change in ({'num_turns': 1}, {'total_cost_usd': 0.1},
+        for change in ({'total_cost_usd': 0.1},
                        {'usage': {'input_tokens': 1}}, {'is_error': False},
                        {'usage': {'input_tokens': None}}):
             self.assertFalse(manager.safe_claude_rejection(json.dumps({**base, **change})))
@@ -54,10 +54,25 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(manager.claude_rejection_reason(json.dumps({
             'is_error': True, 'result': 'Some other error', 'usage': {}})),
             'missing turn count without explicit quota rejection')
-        self.assertEqual(manager.claude_rejection_reason(json.dumps({
+        self.assertIsNone(manager.claude_rejection_reason(json.dumps({
             'is_error': True, 'result': 'Usage limit reached',
-            'num_turns': 1, 'usage': {}})),
-            'Claude reported executed turns')
+            'num_turns': 1, 'usage': {'input_tokens': 0, 'output_tokens': 0}})))
+
+    def test_real_claude_quota_one_turn_zero_tokens_retries(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
+                 patch.object(manager, 'repository_snapshot', return_value=('head', 'clean')):
+                payload = json.dumps({'type': 'result', 'is_error': True,
+                                      'result': 'Usage limit reached; resets tomorrow',
+                                      'num_turns': 1, 'duration_api_ms': 4500,
+                                      'total_cost_usd': 0,
+                                      'usage': {'input_tokens': 0, 'cache_read_input_tokens': 0,
+                                                'output_tokens': 0}})
+                def runner(cmd, **kwargs):
+                    return CompletedProcess(cmd, 0, payload, '')
+                with self.assertRaises(manager.ProviderLimitError) as ctx:
+                    manager.run_turn(pathlib.Path(d), 'claude', 'check readme', {}, {}, runner)
+                self.assertTrue(ctx.exception.safe_retry)
 
     def test_preflight_quota_without_num_turns_run_turn(self):
         with tempfile.TemporaryDirectory() as d:
@@ -80,8 +95,8 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'dirty')),
                          'repository changed during failed request')
         self.assertEqual(manager.claude_rejection_reason(json.dumps({
-            'is_error': True, 'num_turns': 1, 'usage': {}})),
-            'Claude reported executed turns')
+            'is_error': True, 'num_turns': 1, 'usage': {}, 'result': 'Other error'})),
+            'not an explicit quota rejection')
 
     def test_realistic_limit_rejection_with_nonzero_duration(self):
         with tempfile.TemporaryDirectory() as d:
