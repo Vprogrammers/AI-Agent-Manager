@@ -14,12 +14,16 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             choose_profile("x","bad")
     def test_isolation(self):
-        with profile_environment("minimal",{"A":"B"}) as env:
-            self.assertEqual(env["A"],"B")
-            self.assertTrue(Path(env["CODEX_HOME"]).exists())
-            self.assertEqual((Path(env["CODEX_HOME"])/"config.toml").read_text(),"")
-            directory=Path(env["CODEX_HOME"])
-        self.assertFalse(directory.exists())
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            with profile_environment("minimal", {"A": "B", "AAM_PROFILE_HOME": base}) as env:
+                self.assertEqual(env["A"], "B")
+                directory = Path(env["CODEX_HOME"])
+                self.assertTrue(directory.exists())
+                self.assertEqual((directory / "config.toml").read_text(), "")
+            self.assertTrue(directory.exists())
+            with profile_environment("coding", {"AAM_PROFILE_HOME": base}) as env:
+                self.assertNotEqual(Path(env["CODEX_HOME"]), directory)
     def test_full_keeps_environment(self):
         with profile_environment("full",{"A":"B"}) as env:
             self.assertEqual(env,{"A":"B"})

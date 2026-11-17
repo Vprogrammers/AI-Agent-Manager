@@ -7,6 +7,8 @@ from unittest.mock import patch
 from subprocess import CompletedProcess
 
 FILE = pathlib.Path(__file__).resolve().parents[1] / 'src' / 'ai_agent_manager.py'
+import sys
+sys.path.insert(0, str(FILE.parent))
 spec = importlib.util.spec_from_file_location('manager', FILE)
 manager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(manager)
