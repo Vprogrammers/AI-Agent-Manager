@@ -21,13 +21,13 @@ Model routing is optional: `AAM_CODEX_LOW_MODEL`, `AAM_CODEX_MEDIUM_MODEL`, `AAM
 
 State is stored under the **target repository's Git directory** in `ai-agent-manager/agent-bridge.json`, not in tracked files. Optional project handoff: `.ai-agent-manager/HANDOFF.md`. Cross-provider handoff includes bounded recent explicit turns and current Git facts, not native provider context. Review uncommitted changes before continuing. On a suspected provider limit, the next request may switch provider; failed requests are **not automatically replayed**.
 
-## Safety and compatibility
+## Portable features\n\nStreaming progress, per-turn duration and reported token usage, local JSONL ledger, /new, /status, and controlled interruption. See [operations](docs/OPERATIONS.md).\n\n## Safety and compatibility
 
 - **Does not** install shell aliases, replace native `claude` / `codex`, modify `AGENTS.md`, or commit/push target repositories.
 - Do not run simultaneously against the same target repo: concurrent state writes are not coordinated.
 - A CLI failure may still have modified files; inspect `git status` before retrying.
 - CLI output formats and session resume syntax may change. Verify with your installed CLI versions.
-- This initial extraction does not include the Gustero-specific terminal UI, streaming, usage ledger, or installer patches. Those require separate integration and testing before being advertised as portable.
+- The native Gustero terminal UI and shell alias patches are intentionally not copied. This project has its own streaming and opt-in installer.
 - Python unit tests: `python3 -m unittest discover -s tests -v`.
 
 ## License

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Project-independent Claude Code / Codex bridge with bounded Git handoff."""
 import argparse
+import signal
+import time
+import threading
 import json
 import os
 import re
@@ -10,6 +13,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from collections import deque
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -103,9 +107,85 @@ def handoff(root, state):
             'Recent explicit turns (may be truncated; verify against files):\n'
             + json.dumps(history, ensure_ascii=False)[-MAX_CONTEXT:])
 
+def usage_from_output(tool, output):
+    """Extract provider-reported usage; never invent missing token counts."""
+    if tool == 'codex':
+        for line in reversed(output.splitlines()):
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get('type') == 'turn.completed':
+                usage = obj.get('usage') or {}
+                return {k: usage.get(k) for k in ('input_tokens', 'cached_input_tokens', 'output_tokens') if isinstance(usage.get(k), int)}
+    else:
+        try:
+            obj = json.loads(output)
+            usage = obj.get('usage') or {}
+            return {k: usage.get(k) for k in ('input_tokens', 'cache_read_input_tokens', 'output_tokens') if isinstance(usage.get(k), int)}
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def record_usage(root, tool, model, seconds, usage, status):
+    log = store_path(root).with_name('usage.jsonl')
+    log.parent.mkdir(parents=True, exist_ok=True)
+    entry = {'utc': datetime.now(timezone.utc).isoformat(), 'provider': tool,
+             'model': model, 'duration_seconds': round(seconds, 3),
+             'status': status, 'usage': usage}
+    with log.open('a', encoding='utf-8') as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + '\\n')
+
+
+def stream_runner(cmd, cwd, tool, model):
+    """Stream progress from JSONL events, keeping stdout parseable and memory bounded."""
+    start = time.monotonic()
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, bufsize=1,
+                            start_new_session=True)
+    stdout_lines = []
+    errors = deque(maxlen=40)
+    def read_stderr():
+        for line in proc.stderr:
+            errors.append(line)
+    thread = threading.Thread(target=read_stderr, daemon=True)
+    thread.start()
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            if tool == 'codex':
+                try:
+                    obj = json.loads(line)
+                    event = obj.get('type', '')
+                    if event.startswith('item.') or event.startswith('turn.'):
+                        item = obj.get('item') or {}
+                        kind = item.get('type', event)
+                        print(f'[aam] {tool}/{model}: {event} {kind} ({time.monotonic()-start:.1f}s)', file=sys.stderr, flush=True)
+                except json.JSONDecodeError:
+                    pass
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        print('[aam] Interrupt requested; stopping active CLI process group.', file=sys.stderr)
+        os.killpg(proc.pid, signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+        raise InterruptedError('Request interrupted; inspect Git changes before retrying')
+    finally:
+        thread.join(timeout=2)
+    return subprocess.CompletedProcess(cmd, rc, ''.join(stdout_lines), ''.join(errors))
+
+
 def run_turn(root, tool, prompt, state, env=None, runner=None):
     env = os.environ if env is None else env
-    runner = subprocess.run if runner is None else runner
+    runner = stream_runner if runner is None else runner
     sessions = state.setdefault('sessions', {})
     sid = sessions.get(tool)
     previous = state.get('last_tool')
@@ -113,7 +193,15 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     actual_prompt = (handoff(root, state) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
     model = model_for(tool, prompt, env)
     cmd = build_command(tool, model, sid, actual_prompt)
-    completed = runner(cmd, cwd=str(root), capture_output=True, text=True)
+    start = time.monotonic()
+    if runner is stream_runner:
+        completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default')
+    else:
+        completed = runner(cmd, cwd=str(root), capture_output=True, text=True)
+    elapsed = time.monotonic() - start
+    usage = usage_from_output(tool, completed.stdout)
+    record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed')
+    print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
     if completed.returncode:
         detail = (completed.stderr or completed.stdout)[-2000:]
         raise RuntimeError(f'{tool} exited {completed.returncode}: {detail}')
@@ -142,7 +230,7 @@ def main():
         p.error(f'{ns.tool} executable not found')
     state = {} if ns.new or not path.exists() else json.loads(path.read_text())
     tool = ns.tool
-    print('[aam] Per-turn model selection; /claude, /codex, /exit; shared Git handoff.', file=sys.stderr)
+    print('[aam] Per-turn model selection; /claude, /codex, /new, /status, /exit; shared Git handoff.', file=sys.stderr)
     def execute(prompt):
         nonlocal tool
         pending = state.get('pending_switch')
@@ -151,7 +239,7 @@ def main():
             print(f'[aam] Automatically switching next turn to {tool} after previous limit', file=sys.stderr)
         try:
             answer, model = run_turn(root, tool, prompt, state)
-        except (RuntimeError, ValueError, json.JSONDecodeError) as e:
+        except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
             message = str(e)
             print(f'[aam] {message}', file=sys.stderr)
             if LIMIT.search(message):
@@ -179,6 +267,14 @@ def main():
             break
         if prompt in ('/exit', '/quit'):
             break
+        if prompt == '/new':
+            state.clear()
+            save(path, state)
+            print('[aam] New bridge session (native session references cleared)', file=sys.stderr)
+            continue
+        if prompt == '/status':
+            print(json.dumps({'agent': tool, 'sessions': list(state.get('sessions', {})), 'last_tool': state.get('last_tool'), 'pending_switch': state.get('pending_switch')}, ensure_ascii=False))
+            continue
         if prompt in ('/claude', '/codex'):
             candidate = prompt[1:]
             if not shutil.which(candidate):
