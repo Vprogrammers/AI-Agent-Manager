@@ -216,22 +216,37 @@ def repository_snapshot(root):
             git(root, 'diff', '--cached', '--binary'))
 
 
-def safe_claude_rejection(stdout):
-    """Only retry when Claude explicitly reports zero work and zero usage."""
+def claude_rejection_reason(stdout):
+    """Return a non-sensitive reason when automatic replay is unsafe."""
     try:
         obj = json.loads(stdout)
     except (ValueError, TypeError):
-        return False
+        return 'invalid Claude response'
     if not isinstance(obj, dict) or obj.get('is_error') is not True:
-        return False
+        return 'not an explicit Claude error'
     if obj.get('num_turns') != 0:
-        return False
+        return 'Claude did not confirm zero turns'
     if obj.get('total_cost_usd', 0) != 0:
-        return False
+        return 'Claude reported nonzero cost'
     usage = obj.get('usage', {})
     if not isinstance(usage, dict):
-        return False
-    return all(type(value) in (int, float) and value == 0 for value in usage.values())
+        return 'invalid usage metadata'
+    if not all(type(value) in (int, float) and value == 0 for value in usage.values()):
+        return 'Claude reported token usage'
+    return None
+
+
+def safe_claude_rejection(stdout):
+    return claude_rejection_reason(stdout) is None
+
+
+def claude_retry_reason(stdout, before, after):
+    reason = claude_rejection_reason(stdout)
+    if reason:
+        return reason
+    if before != after:
+        return 'repository changed during failed request'
+    return None
 
 
 def run_turn(root, tool, prompt, state, env=None, runner=None):
@@ -262,16 +277,18 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
     if completed.returncode:
         summary = limit_summary(tool, completed.stdout, completed.stderr)
         if summary:
-            safe = (tool == 'claude' and safe_claude_rejection(completed.stdout)
-                    and before == repository_snapshot(root))
-            raise ProviderLimitError(summary, safe_retry=safe)
+            reason = claude_retry_reason(completed.stdout, before, repository_snapshot(root)) if tool == 'claude' else 'provider has not confirmed zero work'
+            if reason:
+                print(f'[aam] Automatic retry safety check: {reason}', file=sys.stderr)
+            raise ProviderLimitError(summary, safe_retry=reason is None)
         detail = (completed.stderr or completed.stdout)[-500:]
         raise RuntimeError(f'{tool} exited {completed.returncode}: {detail}')
     summary = limit_summary(tool, completed.stdout, completed.stderr) if tool == 'claude' else None
     if summary:
-        safe = (safe_claude_rejection(completed.stdout)
-                and before == repository_snapshot(root))
-        raise ProviderLimitError(summary, safe_retry=safe)
+        reason = claude_retry_reason(completed.stdout, before, repository_snapshot(root))
+        if reason:
+            print(f'[aam] Automatic retry safety check: {reason}', file=sys.stderr)
+        raise ProviderLimitError(summary, safe_retry=reason is None)
     new_sid, answer = parse_result(tool, completed.stdout)
     if sid and new_sid != sid:
         raise RuntimeError('Unexpected native session ID change; state was not saved')

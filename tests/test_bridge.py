@@ -43,6 +43,31 @@ class BridgeTests(unittest.TestCase):
             self.assertFalse(manager.safe_claude_rejection(json.dumps({**base, **change})))
         self.assertFalse(manager.safe_claude_rejection('not json'))
 
+    def test_retry_diagnostics_distinguish_repository_changes(self):
+        payload = json.dumps({'is_error': True, 'num_turns': 0,
+                              'duration_api_ms': 3400, 'usage': {},
+                              'total_cost_usd': 0})
+        self.assertIsNone(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'clean')))
+        self.assertEqual(manager.claude_retry_reason(payload, ('head', 'clean'), ('head', 'dirty')),
+                         'repository changed during failed request')
+        self.assertEqual(manager.claude_rejection_reason(json.dumps({
+            'is_error': True, 'num_turns': 1, 'usage': {}})),
+            'Claude did not confirm zero turns')
+
+    def test_realistic_limit_rejection_with_nonzero_duration(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \\
+                 patch.object(manager, 'repository_snapshot', return_value=('head', 'clean')):
+                payload = json.dumps({'type': 'result', 'is_error': True,
+                                      'result': 'Usage limit reached',
+                                      'num_turns': 0, 'duration_api_ms': 3400,
+                                      'total_cost_usd': 0, 'usage': {}})
+                def runner(cmd, **kwargs):
+                    return CompletedProcess(cmd, 0, payload, '')
+                with self.assertRaises(manager.ProviderLimitError) as ctx:
+                    manager.run_turn(pathlib.Path(d), 'claude', 'check readme', {}, {}, runner)
+                self.assertTrue(ctx.exception.safe_retry)
+
     def test_safe_limit_raises_retryable_error(self):
         with tempfile.TemporaryDirectory() as d:
             with patch.object(manager, 'store_path', return_value=pathlib.Path(d)/'state.json'), \
