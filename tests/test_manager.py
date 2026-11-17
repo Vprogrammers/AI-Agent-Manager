@@ -14,7 +14,7 @@ class ManagerTests(unittest.TestCase):
         from unittest.mock import patch
         import io
         output = io.StringIO()
-        with patch.object(manager.sys.stdout, 'isatty', return_value=True), \
+        with patch.object(output, 'isatty', return_value=True), \
              patch.object(manager.sys, 'stdout', output):
             manager.show_agent_ready('claude', pathlib.Path('.'), clear=True)
         self.assertTrue(output.getvalue().startswith(chr(27) + '[2J' + chr(27) + '[H'))
