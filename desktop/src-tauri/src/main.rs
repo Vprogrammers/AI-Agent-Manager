@@ -160,7 +160,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     }
     {
         let state = app.state::<RunningRequests>();
-        if let Ok(mut requests) = state.0.lock() { requests.remove(&request_id); }
+        if let Ok(mut requests) = state.0.lock() { requests.remove(&request_id); };
     }
     if let Err(message) = result.as_ref() {
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
