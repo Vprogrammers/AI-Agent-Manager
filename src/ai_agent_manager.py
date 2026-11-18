@@ -292,9 +292,11 @@ def main():
     p.add_argument('--root', type=Path, default=Path.cwd())
     p.add_argument('--new', action='store_true')
     p.add_argument('--prompt')
-    p.add_argument('--ui', choices=['classic', 'rich', 'textual'], default='classic',
-                   help='rich: transient live activity and highlighted final answer (requires rich)')
+    p.add_argument('--ui', choices=['classic', 'rich', 'textual'], default=None,
+                   help='UI mode (default: textual in interactive terminals, classic otherwise)')
     ns = p.parse_args()
+    if ns.ui is None:
+        ns.ui = 'textual' if ns.prompt is None and sys.stdin.isatty() and sys.stdout.isatty() else 'classic'
     root = ns.root.resolve()
     if ns.ui == 'rich' and not rich_available():
         p.error('Rich UI requires: python3 -m pip install rich')

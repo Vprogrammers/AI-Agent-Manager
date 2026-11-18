@@ -342,11 +342,11 @@ that a provider has not supplied.
 
 ```bash
 python3 -m pip install textual
-aam codex --root . --ui textual
-# or: aam claude --root . --ui textual
+aam codex --root .
+# or: aam claude --root .
 ```
 
-The full-screen UI includes a multiline composer (Ctrl+Enter to send), separate
+Textual is now the default for interactive terminals. Explicit `--ui textual` also works. For the legacy terminal, use `--ui classic` or `--ui rich`. One-shot `--prompt` and redirected sessions default to classic. Install `textual` before launching the interactive default; if it is missing, AAM reports the install command instead of silently changing UI.\n\nThe full-screen UI includes a multiline composer (Ctrl+Enter to send), separate
 Claude (terracotta) and Codex (teal) answer borders, live provider event labels,
 reported token counters, collapsible steps (Ctrl+O), agent switching (Ctrl+T),
 Git diff summary (Ctrl+D), and session commands. It retains the original Python
