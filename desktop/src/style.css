@@ -6,3 +6,5 @@
 .messages .hint[role=status]{position:sticky;bottom:0;background:#26323d;padding:12px;border:1px solid #43566b;border-radius:8px}
 
 footer .send-button{background:#35b9ad;border:1px solid #35b9ad;color:#101b20;font-weight:750;min-width:100px;box-shadow:0 0 0 1px rgba(53,185,173,.2);transition:background .15s,box-shadow .15s}footer .send-button:not(:disabled):hover{background:#58d6c9;box-shadow:0 0 0 3px rgba(53,185,173,.18)}footer .send-button:focus-visible{outline:3px solid #a4fff3;outline-offset:2px}footer .send-button:disabled{background:#303943;border-color:#404b58;color:#82909f;box-shadow:none;opacity:1;cursor:not-allowed}
+
+.usage-panel{margin-top:22px;border-top:1px solid #3c4652;padding-top:14px;display:flex;flex-direction:column;gap:8px;font-size:12px;color:#c6d3df}.usage-panel strong{color:#f2f5f8}.usage-panel small{color:#8f9baa;line-height:1.5}.limit-banner{padding:12px 24px;background:#283c3d;color:#8af0e4;border-bottom:1px solid #35b9ad;font-size:13px}
