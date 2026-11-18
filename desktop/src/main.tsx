@@ -6,6 +6,12 @@ import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 
 type Provider = 'claude' | 'codex';
+
+type AiConfigItem = { name:string; path:string; kind:string; claude:'supported'|'unsupported'|'unknown'; codex:'supported'|'unsupported'|'unknown'; claudeReason:string; codexReason:string };
+function AiStatus({status,reason}: {status:AiConfigItem['claude'];reason:string}) {
+  return <span className={'ai-status '+status} title={reason} aria-label={status+': '+reason}>{status==='supported'?'Compatible':status==='unsupported'?'Not native':'Unverified'}</span>;
+}
+
 type GithubRepo = { nameWithOwner: string; isPrivate: boolean; description: string | null };
 type Message = { role: 'user' | 'assistant'; text: string; provider: Provider };
 const TOKEN_LABELS: Record<string,string> = {
@@ -65,6 +71,17 @@ function savedWorkspaces(): string[] {
 }
 function App() {
   const [root, setRoot] = React.useState('');
+  const [aiConfig, setAiConfig] = React.useState<AiConfigItem[]>([]);
+  const [aiConfigError, setAiConfigError] = React.useState('');
+  const [aiConfigLoading, setAiConfigLoading] = React.useState(false);
+  const [aiConfigOpen, setAiConfigOpen] = React.useState(false);
+  const scanAiConfig = React.useCallback(async (path:string) => {
+    if (!path.trim()) { setAiConfig([]); return; }
+    setAiConfigLoading(true); setAiConfigError('');
+    try { setAiConfig(await invoke<AiConfigItem[]>('project_ai_config',{root:path})); }
+    catch(e) { setAiConfig([]); setAiConfigError(String(e)); }
+    finally { setAiConfigLoading(false); }
+  },[]);
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<Provider>('claude');
   const [prompt, setPrompt] = React.useState('');
@@ -95,7 +112,7 @@ function App() {
   const [loadingRepos, setLoadingRepos] = React.useState(false);
   const [cloning, setCloning] = React.useState(false);
   const selectWorkspace = (path: string) => {
-    setRoot(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
+    setRoot(path); void scanAiConfig(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
     const next = [path, ...recent.filter(p => p !== path)].slice(0, 8);
     setRecent(next); localStorage.setItem(WORKSPACES_KEY, JSON.stringify(next));
   };
@@ -228,7 +245,22 @@ function App() {
     finally { unlisten?.(); setBusy(false); setStartedAt(null); }
   };
   return <div className="app">
-    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><label>Workspace</label><button className="open-folder" onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">Workspace write allows project edits. Full access requires confirmation before each request.</p><label>Agent</label><div className="agents"><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Provider limits may require a manual continuation when prior work cannot be ruled out.</p><div className="usage-panel">
+    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><label>Workspace</label><button className="open-folder" onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">Workspace write allows project edits. Full access requires confirmation before each request.</p><label>Agent</label><div className="agents"><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Provider limits may require a manual continuation when prior work cannot be ruled out.</p><div className="ai-config-panel">
+      <div className="usage-heading"><strong>Project AI configuration</strong><button onClick={()=>setAiConfigOpen(v=>!v)} aria-expanded={aiConfigOpen}>{aiConfigOpen?'Hide':'Show'}</button></div>
+      {aiConfigOpen&&<>
+        <button className="ai-config-refresh" disabled={!root.trim()||aiConfigLoading} onClick={()=>void scanAiConfig(root)}>{aiConfigLoading?'Scanning…':'Refresh scan'}</button>
+        {aiConfigError&&<p className="ai-config-error">{aiConfigError}</p>}
+        {!aiConfigLoading&&!aiConfigError&&aiConfig.length===0&&<p className="hint">No recognized project-level AI configuration found. Global settings and nested instructions are not scanned.</p>}
+        {aiConfig.length>0&&<div className="ai-config-items">{aiConfig.map(item=><div className="ai-config-item" key={item.path}>
+          <strong title={item.path}>{item.path}</strong><small>{item.kind}</small>
+          <div><span>Claude</span><AiStatus status={item.claude} reason={item.claudeReason}/></div>
+          <p>{item.claudeReason}</p>
+          <div><span>Codex</span><AiStatus status={item.codex} reason={item.codexReason}/></div>
+          <p>{item.codexReason}</p>
+        </div>)}</div>}
+        <small>Compatibility is inferred from conventional file locations, not verified runtime loading. Skills are activated conditionally. Global settings, nested AGENTS.md/CLAUDE.md and custom configuration may change behavior.</small>
+      </>}
+    </div><div className="usage-panel">
       <div className="usage-heading"><strong>Usage statistics</strong><button onClick={()=>setUsageExpanded(v=>!v)} aria-expanded={usageExpanded}>{usageExpanded?'Hide':'Show'}</button></div>
       {usageExpanded&&<>
         <strong>Last request</strong>

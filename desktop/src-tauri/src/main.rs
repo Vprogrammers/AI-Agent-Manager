@@ -90,7 +90,70 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     Ok(())
 }
 
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiConfigItem {
+    name: String,
+    path: String,
+    kind: String,
+    claude: String,
+    codex: String,
+    claude_reason: String,
+    codex_reason: String,
+}
+
+fn add_ai_file(items: &mut Vec<AiConfigItem>, root: &Path, file: &Path, kind: &str, claude: (&str, &str), codex: (&str, &str)) {
+    if !file.is_file() || items.len() >= 150 { return; }
+    let path = file.strip_prefix(root).unwrap_or(file).to_string_lossy().into_owned();
+    items.push(AiConfigItem {
+        name: file.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        path, kind: kind.into(),
+        claude: claude.0.into(), codex: codex.0.into(),
+        claude_reason: claude.1.into(), codex_reason: codex.1.into(),
+    });
+}
+
+#[tauri::command]
+fn project_ai_config(root: String) -> Result<Vec<AiConfigItem>, String> {
+    let root = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    if !root.is_dir() { return Err("Workspace is not a directory".into()); }
+    let mut items = Vec::new();
+    add_ai_file(&mut items, &root, &root.join("CLAUDE.md"), "instructions",
+        ("supported", "Claude Code recognizes CLAUDE.md; actual loading depends on CLI settings."),
+        ("unsupported", "Codex does not natively use CLAUDE.md as its project instruction file."));
+    add_ai_file(&mut items, &root, &root.join("AGENTS.md"), "instructions",
+        ("unsupported", "Claude Code does not natively use AGENTS.md as its project instruction file."),
+        ("supported", "Codex recognizes AGENTS.md; actual loading depends on CLI settings."));
+    for (folder, claude, codex) in [
+        (".claude/skills", ("supported", "Claude Code skill location; invocation is conditional."), ("unsupported", "Not a standard Codex skill directory.")),
+        (".agents/skills", ("unknown", "Claude Code support depends on version and configuration."), ("supported", "Codex project skill location; invocation is conditional.")),
+    ] {
+        let directory = root.join(folder);
+        if !directory.is_dir() { continue; }
+        if let Ok(entries) = std::fs::read_dir(&directory) {
+            for entry in entries.flatten().take(100) {
+                let skill = entry.path().join("SKILL.md");
+                add_ai_file(&mut items, &root, &skill, "skill", claude, codex);
+            }
+        }
+    }
+    for (folder, claude, codex) in [
+        (".claude/commands", ("supported", "Claude Code custom command; use depends on CLI version."), ("unsupported", "Claude commands are not Codex commands.")),
+    ] {
+        let directory = root.join(folder);
+        if let Ok(entries) = std::fs::read_dir(directory) {
+            for entry in entries.flatten().take(100) {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+                    add_ai_file(&mut items, &root, &entry.path(), "command", claude, codex);
+                }
+            }
+        }
+    }
+    Ok(items)
+}
+
 fn main() {
-    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone])
+    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
