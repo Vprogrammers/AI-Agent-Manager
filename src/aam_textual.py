@@ -43,6 +43,8 @@ class AgentApp(App):
     #status.codex { border-left: solid #35b9ad; }
     #history { height: 1fr; padding: 0 2; scrollbar-size: 1 1; }
     .user { margin: 1 0 0 0; padding: 1 1; background: #232831; color: #e9edf4; height: auto; }
+    .user.claude { background: #30231f; border-left: solid #d78b65; }
+    .user.codex { background: #172d2c; border-left: solid #35b9ad; }
     .agent { margin: 0 0 1 0; padding: 0 1 1 2; background: #14171c; height: auto; border-left: solid #35b9ad; }
     .agent.claude { border-left: solid #d78b65; }
     .agent.codex { border-left: solid #35b9ad; }
@@ -124,7 +126,7 @@ class AgentApp(App):
         if prompt.startswith('/'):
             self.execute_command(prompt)
             return
-        self.append(Static('› ' + prompt, classes='user'))
+        self.append(Static('› ' + prompt, classes='user ' + self.tool))
         self.busy = True
         self.current_tool = self.tool
         self.events = []
