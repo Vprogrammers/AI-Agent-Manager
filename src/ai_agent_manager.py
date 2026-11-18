@@ -444,6 +444,22 @@ def main():
                 else:
                     app.append(__import__('textual.widgets', fromlist=['Static']).Static(
                         f'{candidate} CLI is not installed'))
+            elif command in ('/architect', '/architect-apply'):
+                from project_architect_refresh import refresh_plan, refresh_apply
+                from textual.widgets import Static
+                try:
+                    changes = refresh_plan(root)
+                    if command == '/architect':
+                        summary = '\\n'.join(f"{c['status']}: {c['path']}" for c in changes)
+                        diffs = '\\n'.join(c['diff'] for c in changes if c['diff'])
+                        app.append(Static('Architect preview (no files changed):\\n' + summary + '\\n' + diffs[:18000]))
+                        app.append(Static('Review changes, then enter /architect-apply to approve. Conflicts are preserved.'))
+                    else:
+                        written = refresh_apply(root, changes, approved=True)
+                        app.append(Static('Architect applied: ' + (', '.join(written) or 'no changes') +
+                                          '\\nConflicts preserved: ' + ', '.join(c['path'] for c in changes if c['status'] == 'conflict')))
+                except (OSError, ValueError, RuntimeError) as error:
+                    app.append(Static('Architect error: ' + str(error)))
             elif command == '/diff':
                 diff = git(root, 'diff', '--stat') or 'No unstaged changes'
                 staged = git(root, 'diff', '--cached', '--stat') or 'No staged changes'
