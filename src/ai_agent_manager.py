@@ -308,6 +308,7 @@ def main():
     p.add_argument('--root', type=Path, default=Path.cwd())
     p.add_argument('--new', action='store_true')
     p.add_argument('--prompt')
+    p.add_argument('--desktop-jsonl', action='store_true', help='Emit structured desktop events on stdout')
     p.add_argument('--ui', choices=['classic', 'rich', 'textual'], default=None,
                    help='UI mode (default: textual in interactive terminals, classic otherwise)')
     ns = p.parse_args()
@@ -328,15 +329,22 @@ def main():
         show_agent_ready(tool, root, clear=ns.prompt is None)
     if not sys.stdout.isatty():
         print('[aam] Agent ready: ' + tool, file=sys.stderr)
+    def emit_desktop(kind, **data):
+        print(json.dumps({'kind': kind, **data}, ensure_ascii=False), flush=True)
+
     def execute(prompt, on_event=None, on_result=None, cancel_event=None):
         nonlocal tool
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
             tool = pending
+            if ns.desktop_jsonl:
+                emit_desktop('provider', provider=tool)
             if on_event is None:
                 print(f'[aam] Automatically switching to {tool} after previous limit', file=sys.stderr)
                 show_agent_ready(tool, root)
         for attempt in range(2):
+            if ns.desktop_jsonl:
+                emit_desktop('provider', provider=tool)
             try:
                 if ns.ui == 'rich' and sys.stdout.isatty() and ns.prompt is None:
                     view = RichTurn(tool, model_for(tool, prompt, os.environ))
@@ -359,15 +367,21 @@ def main():
                             if on_event is None:
                                 print('[aam] Claude rejected before execution. Switching to Codex; retrying the same request once.', file=sys.stderr)
                             tool = other
+                            if ns.desktop_jsonl:
+                                emit_desktop('provider', provider=tool)
                             if on_event is None:
                                 show_agent_ready(tool, root)
                             continue
                         print(f'[aam] Next request uses {other}; automatic retry blocked because prior work cannot be ruled out.', file=sys.stderr)
                     else:
                         print(f'[aam] Limit reached; {other} CLI not installed.', file=sys.stderr)
+                if ns.desktop_jsonl:
+                    emit_desktop('error', message=message, provider=tool, usage=state.get('last_usage', {}), pending_provider=state.get('pending_switch'))
                 return 1
             state.pop('pending_switch', None)
             save(path, state)
+            if ns.desktop_jsonl:
+                emit_desktop('result', provider=tool, model=model, usage=state.get('last_usage', {}), answer=answer)
             if on_result is not None:
                 on_result(tool, model, state.get('last_usage', {}), answer)
             elif view is not None:
@@ -378,6 +392,8 @@ def main():
             return 0
         return 1
     if ns.prompt is not None:
+        if ns.desktop_jsonl:
+            return execute(ns.prompt, on_event=lambda event: emit_desktop('activity', provider=tool, event=event))
         return execute(ns.prompt)
     if ns.ui == 'textual':
         if ns.prompt is not None:
