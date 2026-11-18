@@ -18,6 +18,6 @@ fn run_prompt(root: String, provider: String, prompt: String) -> Result<String, 
     }
 }
 fn main() {
-    tauri::Builder::default().invoke_handler(tauri::generate_handler![run_prompt])
+    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }

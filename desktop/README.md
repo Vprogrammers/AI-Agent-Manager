@@ -22,3 +22,9 @@ Enter an absolute path to a Git repository, select Claude or Codex, and send a p
 - Commands execute with the permissions of the current OS user. Never open untrusted repositories without reviewing provider permissions.
 - Windows support requires validation of the Python engine and subprocess/process-group handling before shipping.
 - This is a development scaffold. Tauri bundling is intentionally disabled until distribution and sidecar strategy are implemented.
+
+## Workspace picker and safe provider continuation
+
+Use **Open Folder…** to select a Git repository via the native OS dialog. Recently selected paths are saved in the webview's local storage on this machine (not synchronized).
+
+When Claude reports a limit but the CLI cannot verify that no work was performed, AAM intentionally blocks automatic replay. The desktop UI displays a **Switch to Codex for next request** action instead. Review the working tree first, then send a new continuation prompt; the failed request is not automatically resent.
