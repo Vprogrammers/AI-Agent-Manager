@@ -41,7 +41,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Verify host architecture
-        run: test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+        shell: bash
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
       - name: Install build tools
         run: |
           python -m pip install 'pyinstaller>=6,<7'
