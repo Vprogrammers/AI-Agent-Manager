@@ -51,6 +51,13 @@ class ArchitectWorkflowTests(unittest.TestCase):
         self.assertEqual(len(refresh_apply(self.root, changes, approved=True)), 2)
         self.assertEqual(target.read_text(), "customized")
 
+    def test_source_changed_after_preview_rejected(self):
+        changes = refresh_plan(self.root)
+        (self.root / "main.py").write_text("class Different:\n    pass\n")
+        with self.assertRaises(RuntimeError):
+            refresh_apply(self.root, changes, approved=True)
+        self.assertFalse((self.root / STATE).exists())
+
     def test_symlink_manifest_blocks_writes(self):
         external = self.root / "external"
         external.write_text("keep")
