@@ -18,7 +18,7 @@ def project_context(root):
     if not root:
         return []
     root = Path(root)
-    return [name for name in ("AGENTS.md", "CLAUDE.md", ".agents/skills/project-workflow/SKILL.md", ".claude/skills/project-workflow/SKILL.md")
+    return [name for name in ("AGENTS.md", "CLAUDE.md", ".agents/skills/project-workflow/SKILL.md", ".claude/skills/project-workflow/SKILL.md", ".ai-agent-manager/architect/PROJECT.md", ".ai-agent-manager/architect/agents/project-reviewer.md", ".ai-agent-manager/architect/skills/project-workflow/SKILL.md")
             if (root / name).is_file()]
 
 def route(prompt, state, env, available=None, mode="auto", root=None):

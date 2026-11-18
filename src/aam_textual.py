@@ -87,7 +87,7 @@ class AgentApp(App):
         self.last_model = None
         self.preview = None
         self.preview_text = ''
-        self.command_candidates = ('/claude', '/codex', '/new', '/status', '/context', '/analytics', '/checkpoint', '/recover', '/history', '/tokens', '/diff', '/updates', '/help', '/quit')
+        self.command_candidates = ('/claude', '/codex', '/new', '/status', '/context', '/analytics', '/checkpoint', '/recover', '/history', '/tokens', '/diff', '/updates', '/architect', '/architect-apply', '/help', '/quit')
 
     def compose(self) -> ComposeResult:
         yield Header()
