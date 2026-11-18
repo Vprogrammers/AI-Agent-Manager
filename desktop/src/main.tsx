@@ -16,18 +16,6 @@ const TOKEN_LABELS: Record<string,string> = {
   output_tokens: 'Output',
   reasoning_output_tokens: 'Reasoning output',
 };
-function tokenRows(value: string): Array<[string,string]> {
-  if (!value || /^(Waiting|Not reported|0 reported)/.test(value)) return [];
-  return value.split(' · ').map(part => {
-    const index = part.lastIndexOf(': ');
-    if (index < 0) return null;
-    const key = part.slice(0,index).trim();
-    const number = Number(part.slice(index+2).trim());
-    if (!Number.isFinite(number)) return null;
-    return [TOKEN_LABELS[key] || key.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()), number.toLocaleString('en-US')] as [string,string];
-  }).filter((row): row is [string,string] => row !== null);
-}
-
 type TokenUsage = Record<string, number>;
 type UsageRecord = { provider: Provider; model: string; duration: number; usage: TokenUsage; time: string };
 const USAGE_PREFIX = 'aam.desktop.usage.v1:';
