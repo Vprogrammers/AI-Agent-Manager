@@ -68,7 +68,19 @@ export default function AgentSetupWizard() {
     setWorking(id); setError(''); setNotice('');
     try {
       const message = await invoke<string>(action === 'install' ? 'install_provider_cli' : 'open_provider_login', { provider: id });
-      setNotice(message);
+      if (action === 'install') {
+        // The user has explicitly requested installation; launch the provider's
+        // interactive login immediately afterwards, without another manual step.
+        try {
+          const login = await invoke<string>('open_provider_login', { provider: id });
+          setNotice(message + ' ' + login);
+        } catch (loginError) {
+          setNotice(message + ' Login could not be started automatically; use Open login to retry.');
+          setError(String(loginError));
+        }
+      } else {
+        setNotice(message);
+      }
       await refresh();
     } catch (e) { setError(String(e)); }
     finally { setWorking(null); }
@@ -100,7 +112,7 @@ export default function AgentSetupWizard() {
             return <div className="setup-provider" key={id}>
               <h3>{guide.name} <span className={authenticated ? 'setup-ready' : 'setup-needed'}>{authenticated ? 'Ready' : !installed ? 'Not installed' : item?.authStatus === 'unknown' ? 'Auth unverified' : 'Sign in required'}</span></h3>
               {!installed && <div><p>1. Install the CLI (requires Node.js/npm):</p><button type="button" disabled={!!working || !node?.installed} onClick={() => void perform(id, "install")}>{working === id ? "Installing…" : "Install automatically"}</button><details><summary>Manual alternative</summary><code>{guide.install}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.install)}>Copy</button></details></div>}
-              {installed && !authenticated && <div><p>2. Authenticate in your system terminal:</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>Open login</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
+              {installed && !authenticated && <div><p>2. Finish authentication (the app opens the provider login):</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>Open login</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
               {authenticated && <p>CLI installed and authentication confirmed.</p>}
               <p className="hint">{item?.detail || 'Checking CLI status…'} · <a href={guide.docs} target="_blank" rel="noopener noreferrer">Official setup guide</a></p>
             </div>;
@@ -110,7 +122,7 @@ export default function AgentSetupWizard() {
           <button type="button" onClick={() => void refresh()} disabled={checking}>{checking ? 'Checking…' : 'Recheck installation and login'}</button>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }}>{ready ? 'Continue' : 'Skip for now'}</button>
         </div>
-        <p className="hint">Node.js is installed using the OS package manager after confirmation. CLI installation runs through npm after confirmation. Login opens your system terminal; credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
+        <p className="hint">Node.js is installed using the OS package manager after confirmation. CLI installation runs through npm after confirmation. After CLI installation, the app automatically starts provider login. The provider may open a browser or system terminal; credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
       </section>
     </div>}
   </>;
