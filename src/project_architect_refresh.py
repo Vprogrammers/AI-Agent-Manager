@@ -112,19 +112,19 @@ def _legacy_generated(root):
     instructions = ", ".join(facts["instructions"]) or "None detected"
     return {
         ".ai-agent-manager/architect/PROJECT.md":
-            "# Project architecture (generated)\\n\\n"
-            f"Detected stacks: {stack}\\n\\nExisting instructions: {instructions}\\n\\n"
-            "This inventory is heuristic. Verify actual dependencies and module boundaries before changes.\\n"
-            "Existing agent instructions take precedence. Never overwrite user-authored files.\\n",
+            "# Project architecture (generated)\n\n"
+            f"Detected stacks: {stack}\n\nExisting instructions: {instructions}\n\n"
+            "This inventory is heuristic. Verify actual dependencies and module boundaries before changes.\n"
+            "Existing agent instructions take precedence. Never overwrite user-authored files.\n",
         ".ai-agent-manager/architect/agents/project-reviewer.md":
-            "# Project reviewer\\n\\nReview the repository before editing. Follow existing AGENTS.md, "
+            "# Project reviewer\n\nReview the repository before editing. Follow existing AGENTS.md, "
             "CLAUDE.md and project conventions. Inspect diffs, tests, security and compatibility. "
-            "Do not claim tests passed without running them.\\n",
+            "Do not claim tests passed without running them.\n",
         ".ai-agent-manager/architect/skills/project-workflow/SKILL.md":
-            "# Project workflow\\n\\n1. Inspect relevant source and existing instructions.\\n"
-            "2. Propose a small change with acceptance criteria.\\n"
-            "3. Review the diff and run relevant tests.\\n"
-            "4. Request approval before applying generated configuration changes.\\n",
+            "# Project workflow\n\n1. Inspect relevant source and existing instructions.\n"
+            "2. Propose a small change with acceptance criteria.\n"
+            "3. Review the diff and run relevant tests.\n"
+            "4. Request approval before applying generated configuration changes.\n",
     }
 
 
