@@ -1,6 +1,25 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::{path::{Path, PathBuf}, process::Command};
 
+fn configure_agent_path() {
+    // Finder/Dock launches often lack the user's interactive shell PATH.
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for path in [home.join(".local/bin"), home.join(".npm-global/bin"), home.join(".bun/bin"), home.join(".cargo/bin")] {
+            if path.is_dir() && !dirs.contains(&path) { dirs.push(path); }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    for path in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        let path = PathBuf::from(path);
+        if path.is_dir() && !dirs.contains(&path) { dirs.push(path); }
+    }
+    if let Ok(joined) = std::env::join_paths(dirs) { std::env::set_var("PATH", joined); }
+}
+
 fn aam_executable() -> Result<PathBuf, String> {
     // Tauri installs the sidecar next to the desktop executable.
     // In development, continue to support the local launcher.
@@ -162,6 +181,7 @@ fn project_ai_config(root: String) -> Result<Vec<AiConfigItem>, String> {
 }
 
 fn main() {
+    configure_agent_path();
     tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
