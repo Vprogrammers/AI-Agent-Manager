@@ -105,10 +105,34 @@ def _manifest(root):
         return {}
 
 
+def _legacy_generated(root):
+    """Exact output of the initial standalone generator; safe to adopt only if unchanged."""
+    facts = scan(root)
+    stack = ", ".join(facts["stack"])
+    instructions = ", ".join(facts["instructions"]) or "None detected"
+    return {
+        ".ai-agent-manager/architect/PROJECT.md":
+            "# Project architecture (generated)\n\n"
+            f"Detected stacks: {stack}\n\nExisting instructions: {instructions}\n\n"
+            "This inventory is heuristic. Verify actual dependencies and module boundaries before changes.\n"
+            "Existing agent instructions take precedence. Never overwrite user-authored files.\n",
+        ".ai-agent-manager/architect/agents/project-reviewer.md":
+            "# Project reviewer\n\nReview the repository before editing. Follow existing AGENTS.md, "
+            "CLAUDE.md and project conventions. Inspect diffs, tests, security and compatibility. "
+            "Do not claim tests passed without running them.\n",
+        ".ai-agent-manager/architect/skills/project-workflow/SKILL.md":
+            "# Project workflow\n\n1. Inspect relevant source and existing instructions.\n"
+            "2. Propose a small change with acceptance criteria.\n"
+            "3. Review the diff and run relevant tests.\n"
+            "4. Request approval before applying generated configuration changes.\n",
+    }
+
+
 def refresh_plan(root):
     """Only refresh a file if its bytes match the last approved generation."""
     root = Path(root).resolve()
     saved = _manifest(root)
+    legacy = _legacy_generated(root)
     changes = []
     for relative, desired in generated(root).items():
         path = root / relative
@@ -120,7 +144,7 @@ def refresh_plan(root):
             status = "unchanged"
         elif existing is None:
             status = "create"
-        elif saved.get(relative) == _hash(existing):
+        elif saved.get(relative) == _hash(existing) or (relative not in saved and existing == legacy.get(relative)):
             status = "update"
         else:
             status = "conflict"
@@ -138,7 +162,11 @@ def refresh_apply(root, changes, approved=False):
     if not approved:
         raise PermissionError("Explicit approval required")
     root = Path(root).resolve()
-    # Validate every candidate before writing anything.
+    # Validate preview content and every candidate before writing anything.
+    current_desired = generated(root)
+    for item in changes:
+        if item["path"] not in MANAGED or item["content"] != current_desired.get(item["path"]):
+            raise RuntimeError("Project changed since preview")
     for item in changes:
         relative = item["path"]
         if relative not in MANAGED:
@@ -151,6 +179,9 @@ def refresh_apply(root, changes, approved=False):
             raise RuntimeError("Project changed since preview")
         if item["status"] == "update" and (old is None or _hash(old) != item["previous_hash"]):
             raise RuntimeError("Project changed since preview")
+    manifest_path = root / STATE
+    if manifest_path.is_symlink() or any(p.is_symlink() for p in manifest_path.parents if p != root and root in p.parents):
+        raise ValueError("Manifest symlink blocked")
     manifest = _manifest(root)
     applied = []
     for item in changes:
@@ -166,9 +197,6 @@ def refresh_apply(root, changes, approved=False):
         manifest[item["path"]] = _hash(item["content"])
         applied.append(item["path"])
     if applied:
-        manifest_path = root / STATE
-        if manifest_path.is_symlink():
-            raise ValueError("Manifest symlink blocked")
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return applied
