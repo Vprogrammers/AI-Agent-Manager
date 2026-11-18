@@ -167,7 +167,7 @@ class AgentApp(App):
         if label or model or usage:
             self.refresh_status(self.live_usage)
         if self.active_steps:
-            self.active_steps.update('\\n'.join('  · ' + step for step in self.events[-5:]))
+            self.active_steps.update('\n'.join('  · ' + step for step in self.events[-5:]))
 
     def complete(self, result, error):
         self.busy = False

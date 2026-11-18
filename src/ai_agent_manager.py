@@ -155,7 +155,7 @@ def limit_summary(tool, stdout, stderr):
         details = str(payload.get('result') or payload.get('error') or raw)
     except (ValueError, TypeError, AttributeError):
         pass
-    reset = re.search(r'resets?\s+([^"\\\\\n]+?)(?=[."]|$)', details, re.I)
+    reset = re.search(r'resets?\s+([^"\\\\n]+?)(?=[."]|$)', details, re.I)
     result = f'{tool.capitalize()} | LIMIT REACHED'
     if reset:
         result += f' | resets {reset.group(1).strip()}'
@@ -409,19 +409,19 @@ def main():
                 diff = git(root, 'diff', '--stat') or 'No unstaged changes'
                 staged = git(root, 'diff', '--cached', '--stat') or 'No staged changes'
                 app.append(__import__('textual.widgets', fromlist=['Static']).Static(
-                    'Unstaged:\\n' + diff + '\\nStaged:\\n' + staged))
+                    'Unstaged:\n' + diff + '\nStaged:\n' + staged))
             elif command == '/history':
                 from textual.widgets import Static
                 turns = state.get('history', [])[-12:]
                 if not turns:
                     app.append(Static('No saved turns yet'))
                 for turn in turns:
-                    app.append(Static(f"{turn.get('tool', '?').upper()} · {turn.get('utc', '')}\\n"
-                                      f"› {turn.get('prompt', '')}\\n{turn.get('answer', '')}"))
+                    app.append(Static(f"{turn.get('tool', '?').upper()} · {turn.get('utc', '')}\n"
+                                      f"› {turn.get('prompt', '')}\n{turn.get('answer', '')}"))
             elif command == '/tokens':
                 from textual.widgets import Static
                 app.append(Static('Last turn: ' + json.dumps(state.get('last_usage', {})) +
-                                  '\\nSession totals (completed turns): ' + json.dumps(app.session_usage)))
+                                  '\nSession totals (completed turns): ' + json.dumps(app.session_usage)))
             elif command == '/status':
                 app.append(__import__('textual.widgets', fromlist=['Static']).Static(
                     json.dumps({'agent':tool,'sessions':list(state.get('sessions',{}))})))
