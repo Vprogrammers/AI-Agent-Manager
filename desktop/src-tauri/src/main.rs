@@ -1,5 +1,35 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use std::{path::Path, process::Command};
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubRepo { name_with_owner: String, is_private: bool, description: Option<String> }
+
+#[tauri::command]
+fn github_repositories() -> Result<Vec<GithubRepo>, String> {
+    let result = Command::new("gh").args(["repo", "list", "--limit", "100", "--json", "nameWithOwner,isPrivate,description"]).output()
+        .map_err(|_| "GitHub CLI not found. Install gh and run gh auth login.".to_string())?;
+    if !result.status.success() { return Err(format!("GitHub CLI: {}", String::from_utf8_lossy(&result.stderr))); }
+    serde_json::from_slice(&result.stdout).map_err(|e| format!("Invalid GitHub response: {e}"))
+}
+
+#[tauri::command]
+fn github_clone(repository: String, destination: String) -> Result<String, String> {
+    let parts: Vec<&str> = repository.split('/').collect();
+    if parts.len() != 2 || parts.iter().any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') || *part == "." || *part == "..") {
+        return Err("Invalid repository name".into());
+    }
+    let parent = Path::new(&destination).canonicalize().map_err(|e| format!("Destination: {e}"))?;
+    if !parent.is_dir() { return Err("Choose an existing destination folder".into()); }
+    let target = parent.join(parts[1]);
+    if target.exists() { return Err(format!("Destination already exists: {}. Open it using Open Folder.", target.display())); }
+    let output = Command::new("gh").args(["repo", "clone", &repository, "--"]).arg(&target).output()
+        .map_err(|_| "GitHub CLI not found. Install gh and run gh auth login.".to_string())?;
+    if !output.status.success() { return Err(format!("Clone failed: {}", String::from_utf8_lossy(&output.stderr))); }
+    Ok(target.to_string_lossy().into_owned())
+}
+
 
 #[tauri::command]
 fn run_prompt(root: String, provider: String, prompt: String) -> Result<String, String> {
@@ -18,6 +48,6 @@ fn run_prompt(root: String, provider: String, prompt: String) -> Result<String, 
     }
 }
 fn main() {
-    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt])
+    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }

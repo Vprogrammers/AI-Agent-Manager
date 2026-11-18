@@ -28,3 +28,7 @@ Enter an absolute path to a Git repository, select Claude or Codex, and send a p
 Use **Open Folder…** to select a Git repository via the native OS dialog. Recently selected paths are saved in the webview's local storage on this machine (not synchronized).
 
 When Claude reports a limit but the CLI cannot verify that no work was performed, AAM intentionally blocks automatic replay. The desktop UI displays a **Switch to Codex for next request** action instead. Review the working tree first, then send a new continuation prompt; the failed request is not automatically resent.
+
+## Open from GitHub (development)
+
+Install and authenticate [GitHub CLI](https://cli.github.com/): `gh auth login` and verify `gh auth status`. Click **Open from GitHub…** to list up to 100 repositories available to the authenticated account, filter them, then choose **Clone** and a local parent directory. The new local clone opens as the current workspace. Private repositories require corresponding GitHub permissions. Existing destination folders are never overwritten; use **Open Folder…** to select an existing clone. GitHub CLI is invoked locally; no tokens are stored by AAM Desktop.
