@@ -75,7 +75,6 @@ jobs:
       - name: Build installers
         working-directory: desktop
         shell: bash
-        env:
         run: npm run tauri -- build --bundles ${{ matrix.bundles }}
       - name: Windows Authenticode sign built installers
         if: matrix.platform == 'windows'
