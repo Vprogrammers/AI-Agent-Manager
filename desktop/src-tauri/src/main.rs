@@ -119,8 +119,15 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
         ("codex", "codex", vec!["login", "status"]),
     ] {
         let executable = std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths).map(|p| p.join(binary))
-                .find(|p| p.is_file())
+            std::env::split_paths(&paths).flat_map(|p| {
+                let mut candidates = vec![p.join(binary)];
+                if cfg!(windows) {
+                    for ext in ["exe", "cmd", "bat"] {
+                        candidates.push(p.join(format!("{binary}.{ext}")));
+                    }
+                }
+                candidates
+            }).find(|p| p.is_file())
         });
         let Some(executable) = executable else {
             result.push(ProviderSetup { id: id.into(), installed: false, authenticated: false,
