@@ -105,10 +105,7 @@ def repository_fingerprint(root):
     status = git('status', '--porcelain=v1', '-z', '--untracked-files=all')
     paths = set(git('ls-files', '-m', '-o', '--exclude-standard', '-z').split(b'\0'))
     paths.discard(b'')
-    if len(paths) > MAX_FILES:
-        raise RuntimeError('Too many changed files for safe retry fingerprint')
     digest = hashlib.sha256(head + b'\0' + status)
-    total = 0
     for raw in sorted(paths):
         path = root / os.fsdecode(raw)
         digest.update(raw + b'\0')
@@ -120,9 +117,6 @@ def repository_fingerprint(root):
                     block = f.read(1024 * 1024)
                     if not block:
                         break
-                    total += len(block)
-                    if total > MAX_FILE_HASH_BYTES:
-                        raise RuntimeError('Changed files too large for safe retry fingerprint')
                     digest.update(block)
         else:
             digest.update(b'NONREGULAR')
