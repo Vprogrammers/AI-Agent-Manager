@@ -101,6 +101,71 @@ fn desktop_diagnostics(root: String) -> Vec<Diagnostic> {
     result
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeSetup {
+    installed: bool,
+    detail: String,
+    installer: String,
+}
+
+#[tauri::command]
+async fn node_setup_status() -> NodeSetup {
+    let node = tokio::time::timeout(std::time::Duration::from_secs(5),
+        tokio::process::Command::new("node").arg("--version")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()).await;
+    let npm_bin = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let npm = tokio::time::timeout(std::time::Duration::from_secs(5),
+        tokio::process::Command::new(npm_bin).arg("--version")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()).await;
+    let installed = matches!(node, Ok(Ok(ref s)) if s.success()) &&
+        matches!(npm, Ok(Ok(ref s)) if s.success());
+    let installer = if cfg!(windows) { "winget (OpenJS.NodeJS.LTS)" }
+        else if cfg!(target_os = "macos") { "Homebrew (node)" }
+        else { "apt/dnf/pacman via polkit (supported Linux distributions)" };
+    NodeSetup { installed, detail: if installed { "Node.js and npm available".into() }
+        else { "Node.js or npm missing from application PATH".into() }, installer: installer.into() }
+}
+
+#[tauri::command]
+async fn install_node_runtime() -> Result<String, String> {
+    // Only invoke fixed, reviewed package-manager arguments after UI confirmation.
+    // Never interpolate user input or download and execute remote scripts.
+    let mut command;
+    if cfg!(windows) {
+        command = tokio::process::Command::new("winget");
+        command.args(["install", "--id", "OpenJS.NodeJS.LTS", "--exact",
+            "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"]);
+    } else if cfg!(target_os = "macos") {
+        command = tokio::process::Command::new("brew");
+        command.args(["install", "node"]);
+    } else if cfg!(target_os = "linux") {
+        // pkexec shows an OS-controlled authorization dialog when elevation is needed.
+        if std::path::Path::new("/usr/bin/apt-get").exists() {
+            command = tokio::process::Command::new("pkexec");
+            command.args(["/usr/bin/apt-get", "install", "-y", "nodejs", "npm"]);
+        } else if std::path::Path::new("/usr/bin/dnf").exists() {
+            command = tokio::process::Command::new("pkexec");
+            command.args(["/usr/bin/dnf", "install", "-y", "nodejs", "npm"]);
+        } else if std::path::Path::new("/usr/bin/pacman").exists() {
+            command = tokio::process::Command::new("pkexec");
+            command.args(["/usr/bin/pacman", "-S", "--noconfirm", "nodejs", "npm"]);
+        } else {
+            return Err("No supported Linux package manager found (apt, dnf, pacman).".into());
+        }
+    } else {
+        return Err("Unsupported operating system".into());
+    }
+    command.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(600), command.status())
+        .await.map_err(|_| "Node.js installation timed out".to_string())?
+        .map_err(|_| "Package manager unavailable. On macOS install Homebrew; on Windows install winget; on Linux install polkit.".to_string())?;
+    if !status.success() { return Err("Node.js installation failed or authorization was declined. Check package manager and network access.".into()); }
+    Ok("Node.js installer completed. Restart the app if PATH changed, then recheck.".into())
+}
+
 // Installation is initiated only by an explicit user click. No shell interpolation,
 // elevated privileges, or credentials are handled by the application.
 #[tauri::command]
@@ -361,6 +426,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, install_provider_cli, open_provider_login, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
