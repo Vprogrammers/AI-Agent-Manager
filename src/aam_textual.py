@@ -223,7 +223,7 @@ class AgentApp(App):
 
     def on_text_area_changed(self, event: TextArea.Changed):
         text = event.text_area.text
-        if text.startswith('/') and '\\n' not in text:
+        if text.startswith('/') and '\n' not in text:
             options = [cmd for cmd in self.command_candidates if cmd.startswith(text)]
             self.query_one('#composer-info', Static).update('  '.join(options[:5]) or 'Unknown command')
         else:
