@@ -1,5 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use std::{path::Path, process::Command};
+use std::{path::{Path, PathBuf}, process::Command};
+
+fn aam_executable() -> Result<PathBuf, String> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let local = PathBuf::from(home).join(".local/bin/aam");
+        if local.is_file() { return Ok(local); }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join(if cfg!(windows) { "aam.exe" } else { "aam" });
+            if candidate.is_file() { return Ok(candidate); }
+        }
+    }
+    Err("AAM CLI not found. Install it with scripts/install.sh, then restart the app.".into())
+}
+
 use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use serde::{Serialize, Deserialize};
@@ -42,7 +57,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
-    let mut child = tokio::process::Command::new("aam");
+    let mut child = tokio::process::Command::new(aam_executable()?);
     child.env("AAM_PERMISSION_MODE", &permission);
     child.arg(&provider).arg("--root").arg(&path).arg("--desktop-jsonl")
         .arg("--ui").arg("classic").arg("--prompt").arg(&prompt)

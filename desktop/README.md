@@ -32,3 +32,22 @@ When Claude reports a limit but the CLI cannot verify that no work was performed
 ## Open from GitHub (development)
 
 Install and authenticate [GitHub CLI](https://cli.github.com/): `gh auth login` and verify `gh auth status`. Click **Open from GitHub…** to list up to 100 repositories available to the authenticated account, filter them, then choose **Clone** and a local parent directory. The new local clone opens as the current workspace. Private repositories require corresponding GitHub permissions. Existing destination folders are never overwritten; use **Open Folder…** to select an existing clone. GitHub CLI is invoked locally; no tokens are stored by AAM Desktop.
+
+## macOS desktop packaging (development distribution)
+
+From the repository root, install the Python launcher once:
+
+```bash
+bash scripts/install.sh
+cd desktop
+npm ci
+npm run icons
+npm run tauri build
+```
+
+The macOS bundles are generated under `desktop/src-tauri/target/release/bundle/`.
+Install the `.dmg` or copy the `.app` to Applications and launch from Finder/Dock.
+The GUI now searches `~/.local/bin/aam` before PATH because Finder does not reliably inherit shell PATH.
+**This is not a self-contained installer**: the installed app still requires Python 3, Git, a working AAM launcher pointing at an accessible repository checkout, and an authenticated Claude or Codex CLI.
+GitHub clone also requires `gh`. Distribution to another Mac needs a bundled engine and dependency discovery; public distribution also needs Apple code signing and notarization.
+Windows and Linux packaging are not yet enabled or verified. Do not ship this as a cross-platform release.
