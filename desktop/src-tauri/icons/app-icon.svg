@@ -1,6 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 256 256">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#204653"/><stop offset="1" stop-color="#081a24"/></linearGradient><linearGradient id="mark" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#81f7e5"/><stop offset="1" stop-color="#16b2a7"/></linearGradient></defs>
-<rect width="256" height="256" rx="56" fill="url(#bg)"/><rect x="9" y="9" width="238" height="238" rx="49" fill="none" stroke="#578e98" stroke-opacity=".4" stroke-width="3"/>
-<path d="M57 183 110 65q18-29 36 0l53 118" fill="none" stroke="url(#mark)" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M85 151h86" fill="none" stroke="#9cfced" stroke-width="20" stroke-linecap="round"/>
-<circle cx="202" cy="61" r="14" fill="#eda76b"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+ <linearGradient id="bg" x1="130" y1="80" x2="880" y2="960" gradientUnits="userSpaceOnUse"><stop stop-color="#075D70"/><stop offset=".45" stop-color="#0B2346"/><stop offset="1" stop-color="#18104E"/></linearGradient>
+ <linearGradient id="a" x1="280" y1="300" x2="720" y2="760" gradientUnits="userSpaceOnUse"><stop stop-color="#A2FFF5"/><stop offset=".5" stop-color="#18DFD6"/><stop offset="1" stop-color="#3B7CF5"/></linearGradient>
+ <linearGradient id="wave" x1="250" y1="760" x2="850" y2="910" gradientUnits="userSpaceOnUse"><stop stop-color="#08C6D5"/><stop offset=".55" stop-color="#1858D4"/><stop offset="1" stop-color="#6424D9"/></linearGradient>
+ <linearGradient id="edge" x1="150" y1="110" x2="850" y2="900" gradientUnits="userSpaceOnUse"><stop stop-color="#5DE6E7"/><stop offset=".5" stop-color="#244F93"/><stop offset="1" stop-color="#4D2397"/></linearGradient>
+ <clipPath id="clip"><rect x="104" y="104" width="816" height="816" rx="184"/></clipPath>
+</defs>
+<!-- Inset macOS icon footprint; no full-bleed oversized tile. -->
+<rect x="104" y="104" width="816" height="816" rx="184" fill="url(#bg)"/>
+<g clip-path="url(#clip)">
+ <path d="M104 900C292 750 437 721 573 751c147 33 242-40 347-170v339H104Z" fill="url(#wave)" opacity=".95"/>
+ <path d="M104 902c205-147 341-157 477-118 116 33 217-17 339-140v276H104Z" fill="#4A2ACB" opacity=".38"/>
+ <path d="M290 676 430 366c14-31 51-31 65 0l139 310" fill="none" stroke="url(#a)" stroke-width="67" stroke-linecap="round" stroke-linejoin="round"/>
+ <path d="M350 568h220" fill="none" stroke="#32C9F0" stroke-width="56" stroke-linecap="round"/>
+ <path d="M720 461v211" fill="none" stroke="#F1FBFF" stroke-width="64" stroke-linecap="round"/>
+ <circle cx="720" cy="379" r="32" fill="#F1FBFF"/>
+ <path d="M750 239c15 44 28 57 72 72-44 15-57 28-72 72-15-44-28-57-72-72 44-15 57-28 72-72Z" fill="#7DFFF0"/>
+</g>
+<rect x="108" y="108" width="808" height="808" rx="180" fill="none" stroke="url(#edge)" stroke-width="8" opacity=".65"/>
+</svg>
