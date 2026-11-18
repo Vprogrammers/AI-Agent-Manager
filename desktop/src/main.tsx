@@ -225,7 +225,7 @@ function App() {
         } else if (kind === 'result') {
           completed = true;
           const actual = data.provider === 'codex' ? 'codex' : 'claude';
-          setLastProvider(actual); setProvider(actual);
+          setLastProvider(actual); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(actual);
           const counts = data.usage as Record<string,unknown> | undefined;
           const parsed = numericUsage(counts);
           setLastUsage(parsed); setUsage(Object.keys(parsed).length ? 'Reported' : 'Not reported');
@@ -239,7 +239,7 @@ function App() {
           setError(String(data.message || 'Agent failed')); setPrompt(current=>current||text);
           const pending = data.pending_provider;
           if (pending === 'codex' || pending === 'claude') {
-            setProvider(pending); setLastProvider(String(data.provider || requestedProvider));
+            if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(pending); setLastProvider(String(data.provider || requestedProvider));
             setFailedPrompt(text); setPendingSwitch(true);
             setLimitNotice('Provider limit reached. '+pending+' selected for next request; unsafe replay was blocked.');
           }
