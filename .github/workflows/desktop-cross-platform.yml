@@ -1,0 +1,154 @@
+name: Desktop Cross-platform Release
+on:
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing desktop-vX.Y.Z tag
+        required: true
+        type: string
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15-intel, platform: macos, arch: x86_64, target: x86_64-apple-darwin, bundles: dmg }
+          - { os: macos-15, platform: macos, arch: arm64, target: aarch64-apple-darwin, bundles: dmg }
+          - { os: windows-2022, platform: windows, arch: x86_64, target: x86_64-pc-windows-msvc, bundles: 'msi,nsis' }
+          - { os: ubuntu-24.04, platform: linux, arch: x86_64, target: x86_64-unknown-linux-gnu, bundles: 'deb,rpm,appimage' }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Validate desktop tag and app version
+        shell: bash
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git rev-parse -q --verify "refs/tags/$TAG"
+          VERSION="${TAG#desktop-v}"
+          node -e 'const fs=require("fs"); const v=process.argv[1]; for(const p of ["desktop/package.json","desktop/src-tauri/tauri.conf.json"]){if(JSON.parse(fs.readFileSync(p)).version!==v)process.exit(1)}' "$VERSION"
+          grep -q "^version = \"$VERSION\"$" desktop/src-tauri/Cargo.toml
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux native packages
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev patchelf libayatana-appindicator3-dev rpm
+      - name: Build dependencies
+        shell: bash
+        run: |
+          python -m pip install 'pyinstaller>=6,<7'
+          cd desktop
+          npm ci --no-audit --no-fund
+      - name: Python regression tests
+        shell: bash
+        run: |
+          python -m compileall -q src tests
+          python -m unittest discover -s tests -v
+      - name: Icons
+        working-directory: desktop
+        run: npm run icons
+      - name: Build installers
+        working-directory: desktop
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run tauri -- build --bundles ${{ matrix.bundles }}
+      - name: Windows Authenticode sign built installers
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_BASE64) {
+            Write-Host 'Unsigned preview build: Windows certificate not configured'
+            exit 0
+          }
+          $cert = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($cert, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $files = Get-ChildItem 'desktop/src-tauri/target/release/bundle' -Recurse -File | Where-Object { $_.Extension -in '.msi','.exe' }
+          if (-not $files) { throw 'No Windows installers to sign' }
+          foreach ($file in $files) {
+            & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f $cert /p $env:WINDOWS_CERT_PASSWORD $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed: $($file.FullName)" }
+            & signtool verify /pa $file.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed: $($file.FullName)" }
+          }
+          Remove-Item $cert
+      - name: Collect artifacts
+        shell: bash
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find desktop/src-tauri/target/release/bundle -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) -print | while IFS= read -r f; do
+            cp "$f" "release-assets/AI-Agent-Manager-${TAG}-${{ matrix.platform }}-${{ matrix.arch }}-$(basename "$f")"
+          done
+          test "$(find release-assets -type f | wc -l | tr -d ' ')" -gt 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums and optional GPG signatures
+        shell: bash
+        env:
+          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          if [ -n "$RELEASE_GPG_PRIVATE_KEY" ]; then
+            printf '%s' "$RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
+            gpg --batch --yes --pinentry-mode loopback --passphrase "$RELEASE_GPG_PASSPHRASE" --armor --detach-sign SHA256SUMS.txt
+          fi
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --prerelease --title "AI Agent Manager Desktop $TAG" --notes "Cross-platform preview installers. Signing depends on configured platform credentials. Verify signatures before installation."
+          fi
+          gh release upload "$TAG" release-assets/* --clobber
