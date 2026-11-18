@@ -75,6 +75,7 @@ class AgentApp(App):
         self.active_answer = None
         self.events = []
         self.current_tool = tool
+        self.active_prompt = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -126,7 +127,8 @@ class AgentApp(App):
         if prompt.startswith('/'):
             self.execute_command(prompt)
             return
-        self.append(Static('› ' + prompt, classes='user ' + self.tool))
+        self.active_prompt = Static('› ' + prompt, classes='user ' + self.tool)
+        self.append(self.active_prompt)
         self.busy = True
         self.current_tool = self.tool
         self.events = []
@@ -162,6 +164,10 @@ class AgentApp(App):
             self.append(Static('Request failed. Check provider logs.', classes='agent ' + self.current_tool))
             return
         tool, model, usage, answer = result
+        if self.active_prompt is not None:
+            self.active_prompt.remove_class('claude', 'codex')
+            self.active_prompt.add_class(tool)
+            self.active_prompt = None
         self.tool = tool
         self.model_name = model
         self.refresh_status(usage)
