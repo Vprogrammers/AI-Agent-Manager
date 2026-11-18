@@ -291,7 +291,7 @@ def main():
     p.add_argument('--root', type=Path, default=Path.cwd())
     p.add_argument('--new', action='store_true')
     p.add_argument('--prompt')
-    p.add_argument('--ui', choices=['classic', 'rich'], default='classic',
+    p.add_argument('--ui', choices=['classic', 'rich', 'textual'], default='classic',
                    help='rich: transient live activity and highlighted final answer (requires rich)')
     ns = p.parse_args()
     root = ns.root.resolve()
@@ -305,10 +305,11 @@ def main():
         p.error(f'{ns.tool} executable not found')
     state = {} if ns.new or not path.exists() else json.loads(path.read_text())
     tool = ns.tool
-    show_agent_ready(tool, root, clear=ns.prompt is None)
+    if ns.ui != 'textual':
+        show_agent_ready(tool, root, clear=ns.prompt is None)
     if not sys.stdout.isatty():
         print('[aam] Agent ready: ' + tool, file=sys.stderr)
-    def execute(prompt):
+    def execute(prompt, on_event=None, on_result=None):
         nonlocal tool
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
@@ -323,7 +324,7 @@ def main():
                         answer, model = run_turn(root, tool, prompt, state, on_event=view.event)
                 else:
                     view = None
-                    answer, model = run_turn(root, tool, prompt, state)
+                    answer, model = run_turn(root, tool, prompt, state, on_event=on_event)
             except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
                 message = str(e)
                 print(f'[aam] {message}', file=sys.stderr)
@@ -344,7 +345,9 @@ def main():
                 return 1
             state.pop('pending_switch', None)
             save(path, state)
-            if view is not None:
+            if on_result is not None:
+                on_result(tool, model, state.get('last_usage', {}), answer)
+            elif view is not None:
                 view.finish(tool, model, state.get('last_usage', {}), answer)
             else:
                 print(f'[aam] {tool} | {model}', file=sys.stderr)
@@ -353,6 +356,62 @@ def main():
         return 1
     if ns.prompt is not None:
         return execute(ns.prompt)
+    if ns.ui == 'textual':
+        if ns.prompt is not None:
+            p.error('--ui textual requires an interactive terminal (omit --prompt)')
+        try:
+            from aam_textual import AgentApp
+        except ImportError as error:
+            p.error(f'Textual UI requires: python3 -m pip install textual ({error})')
+        def tui_execute(prompt, event):
+            output = []
+            code = execute(prompt, on_event=event,
+                           on_result=lambda agent, model, usage, answer:
+                               output.append((agent, model, usage, answer)))
+            return output[0] if code == 0 and output else None
+        def tui_command(command):
+            nonlocal tool
+            if command in ('/claude', '/codex'):
+                candidate = command[1:]
+                if shutil.which(candidate):
+                    tool = candidate
+                    state.pop('pending_switch', None)
+                    app.tool = tool
+                    app.model_name = model_for(tool, '', os.environ) or 'CLI default'
+                    app.refresh_status()
+                else:
+                    app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                        f'{candidate} CLI is not installed'))
+            elif command == '/diff':
+                diff = git(root, 'diff', '--stat') or 'No unstaged changes'
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(diff))
+            elif command == '/status':
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    json.dumps({'agent':tool,'sessions':list(state.get('sessions',{}))})))
+            elif command == '/new':
+                state.clear()
+                save(path, state)
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    'New session: saved references cleared'))
+            elif command == '/checkpoint':
+                write_checkpoint(path.with_name('checkpoint.json'), state, optimization_settings(os.environ))
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static('Checkpoint saved'))
+            elif command == '/recover':
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    json.dumps(load_checkpoint(path.with_name('checkpoint.json')) or {}, indent=2)))
+            elif command == '/analytics':
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    json.dumps(analytics(path.with_name('usage.jsonl')), indent=2)))
+            elif command == '/context':
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    json.dumps(state.get('context_observations', {}))))
+            else:
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    'Unknown command: ' + command))
+        app = AgentApp(root, tool, tui_execute, tui_command,
+                       model_for(tool, '', os.environ) or 'CLI default')
+        app.run()
+        return 0
     while True:
         try:
             prompt = input(f'{tool}> ').strip()

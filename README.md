@@ -336,3 +336,25 @@ plain output. The default `--ui classic` remains dependency-free.
 This is the first presentation-layer MVP, not yet a full-screen Textual application.
 It never exposes hidden reasoning or tool arguments, and cannot display token counts
 that a provider has not supplied.
+
+
+## Textual full-screen TUI (experimental)
+
+```bash
+python3 -m pip install textual
+aam codex --root . --ui textual
+# or: aam claude --root . --ui textual
+```
+
+The full-screen UI includes a multiline composer (Ctrl+Enter to send), separate
+Claude (terracotta) and Codex (teal) answer borders, live provider event labels,
+reported token counters, collapsible steps (Ctrl+O), agent switching (Ctrl+T),
+Git diff summary (Ctrl+D), and session commands. It retains the original Python
+orchestration and safe retry policy. Ctrl+Q exits.
+
+**Limitations:** This is an experimental interface. Native CLI approval prompts
+are not reproduced; the CLI's configured permission mode still applies. The
+provider's reported model may be unavailable when using its default selection.
+Claude JSON output does not guarantee intermediate events; the app only displays
+those actually emitted. Tool arguments and hidden reasoning are intentionally
+not displayed. Test the app in a real terminal before relying on it for edits.

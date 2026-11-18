@@ -40,6 +40,11 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
             decoded = line.decode('utf-8', 'replace')
             if tool == 'claude':
                 stdout.append(decoded)
+                if on_event is not None:
+                    try:
+                        on_event(json.loads(decoded))
+                    except ValueError:
+                        pass
                 continue
             try:
                 obj = json.loads(decoded)
