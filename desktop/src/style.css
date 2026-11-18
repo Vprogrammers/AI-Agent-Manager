@@ -12,3 +12,17 @@ footer .send-button{background:#35b9ad;border:1px solid #35b9ad;color:#101b20;fo
 article.streaming{border-color:#35b9ad;background:#1b2730}article.streaming small{color:#6fe0d3}.stream-cursor{color:#35b9ad;animation:stream-blink .8s steps(2,start) infinite}@keyframes stream-blink{to{opacity:0}}
 
 .token-stats{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-top:1px solid #35404c}.token-row{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.token-row span:first-child{color:#aebbc8}.token-value{color:#eaf2f5;font-variant-numeric:tabular-nums;font-weight:650;text-align:right}.token-empty{color:#9ba7b7}
+
+/* Keep the application shell fixed; only conversation history scrolls. */
+html,body,#root{height:100%;overflow:hidden}
+.app{height:100dvh;min-height:0;overflow:hidden}
+.app>aside{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.app>main{min-height:0;overflow:hidden}
+.messages{min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+header,footer{flex-shrink:0}
+.agents button:disabled{opacity:1;cursor:default}
+footer .send-button.claude:not(:disabled){background:#d78b65;border-color:#d78b65;color:#20150f}
+footer .send-button.claude:not(:disabled):hover{background:#ecaa88;box-shadow:0 0 0 3px rgba(215,139,101,.2)}
+footer .send-button.codex:not(:disabled){background:#35b9ad;border-color:#35b9ad;color:#101b20}
+footer .send-button.codex:not(:disabled):hover{background:#58d6c9;box-shadow:0 0 0 3px rgba(53,185,173,.18)}
+@media(max-width:700px){.app{grid-template-rows:minmax(0,auto) minmax(0,1fr)}.app>aside{max-height:38dvh}}
