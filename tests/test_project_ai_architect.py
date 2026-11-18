@@ -34,7 +34,7 @@ class ProjectArchitectTests(unittest.TestCase):
             target.parent.mkdir(parents=True)
             target.write_text("custom instructions")
             changes = plan(root)
-            self.assertTrue(any(c["status"] == "preserved" for c in changes))
+            self.assertTrue(any(c["status"] == "conflict" for c in changes))
             apply(root, changes, approved=True)
             self.assertEqual(target.read_text(), "custom instructions")
 
