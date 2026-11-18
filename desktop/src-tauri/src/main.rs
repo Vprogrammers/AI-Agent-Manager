@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use std::{path::{Path, PathBuf}, process::Command};
+use std::{path::{Path, PathBuf}, process::Command, sync::{Arc,Mutex}};
+use std::collections::HashMap;
+use tauri::Manager;
 
 fn configure_agent_path() {
     // Finder/Dock launches often lack the user's interactive shell PATH.
@@ -75,6 +77,37 @@ fn github_clone(repository: String, destination: String) -> Result<String, Strin
 }
 
 
+
+#[derive(Default)]
+struct RunningRequests(Mutex<HashMap<String, Arc<tokio::sync::Notify>>>);
+
+#[derive(Serialize)]
+struct Diagnostic { name: String, status: String, detail: String }
+
+#[tauri::command]
+fn desktop_diagnostics(root: String) -> Vec<Diagnostic> {
+    let mut result = Vec::new();
+    let engine = aam_executable();
+    result.push(Diagnostic {name:"AAM engine".into(),status:if engine.is_ok() {"ready"}else{"missing"}.into(),detail:engine.map(|p|p.display().to_string()).unwrap_or_else(|e|e)});
+    for (name, binary) in [("Git","git"),("Claude Code","claude"),("Codex","codex"),("GitHub CLI (optional)","gh")] {
+        let found = std::env::var_os("PATH").and_then(|paths|std::env::split_paths(&paths).map(|p|p.join(binary)).find(|p|p.is_file()));
+        result.push(Diagnostic {name:name.into(),status:if found.is_some(){"ready"}else{"missing"}.into(),detail:found.map(|p|p.display().to_string()).unwrap_or_else(||format!("{binary} not found in PATH"))});
+    }
+    if !root.is_empty() {
+        let valid = Path::new(&root).is_dir() && Command::new("git").args(["-C",&root,"rev-parse","--is-inside-work-tree"]).output().map(|o|o.status.success()).unwrap_or(false);
+        result.push(Diagnostic{name:"Git workspace".into(),status:if valid{"ready"}else{"missing"}.into(),detail:if valid{"Valid Git workspace"}else{"Select a valid Git repository"}.into()});
+    }
+    result
+}
+
+#[tauri::command]
+fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -> Result<(), String> {
+    let requests = state.0.lock().map_err(|_|"Request state unavailable")?;
+    let signal = requests.get(&request_id).ok_or("Request is no longer running")?;
+    signal.notify_one();
+    Ok(())
+}
+
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
     if provider != "claude" && provider != "codex" { return Err("Invalid provider".into()); }
@@ -91,6 +124,11 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let mut child = child.spawn().map_err(|e| format!("Cannot launch aam: {e}"))?;
+    let stop = Arc::new(tokio::sync::Notify::new());
+    {
+        let state = app.state::<RunningRequests>();
+        state.0.lock().map_err(|_|"Request state unavailable")?.insert(request_id.clone(),stop.clone());
+    }
     let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
     let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
     let stderr_task = tokio::spawn(async move {
@@ -102,16 +140,33 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         log
     });
     let mut lines = BufReader::new(stdout).lines();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(600), async {
-        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
+    let mut cancelled = false;
+    let result = tokio::select! {
+        outcome = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+            while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
+                }
             }
-        }
-        child.wait().await.map_err(|e| e.to_string())
-    }).await.map_err(|_| "Request timed out after 10 minutes; inspect changes before retrying".to_string())??;
+            child.wait().await.map_err(|e| e.to_string())
+        }) => outcome.map_err(|_|"Request timed out after 10 minutes".to_string()).and_then(|r|r),
+        _ = stop.notified() => { cancelled = true; Err("Request stopped by user".to_string()) }
+    };
+    if cancelled || result.is_err() {
+        // kill_on_drop terminates the AAM process; the engine's subprocess handling
+        // may need separate process-group cleanup on each supported OS.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+    {
+        let state = app.state::<RunningRequests>();
+        if let Ok(mut requests) = state.0.lock() { requests.remove(&request_id); }
+    }
+    if let Err(message) = result.as_ref() {
+        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
+    }
     let stderr = stderr_task.await.unwrap_or_default();
-    if !result.success() {
+    if result.as_ref().is_ok_and(|status| !status.success()) {
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":stderr}}));
     }
     Ok(())
@@ -182,6 +237,6 @@ fn project_ai_config(root: String) -> Result<Vec<AiConfigItem>, String> {
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config])
+    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, cancel_prompt])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }

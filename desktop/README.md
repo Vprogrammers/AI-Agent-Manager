@@ -69,3 +69,9 @@ The Tauri build hook runs `npm run bundle:engine` to generate `src-tauri/binarie
 **External requirements remain:** Git, Claude Code and/or Codex CLI, and authentication for the chosen agent. GitHub cloning additionally requires `gh`. GUI-launched macOS apps may not inherit shell PATH for these external tools; dependency discovery and setup UI remain to be implemented. The application is not yet a verified one-click experience on a fresh machine.
 
 macOS public distribution requires signing and notarization. Windows/Linux builds require platform CI, signing where applicable, and verification. Do not publish unsigned installers as trusted releases.
+
+## Troubleshooting DMG packaging
+
+`cargo build --release` only creates `target/release/aam-desktop`. It **does not** create a DMG. Run `npm run tauri build` from `desktop/` after installing PyInstaller and generating icons. Look under `desktop/src-tauri/target/release/bundle/dmg/`. Do not use `--no-bundle`. The full Tauri command must complete successfully; a screenshot of the Rust compiler finishing does not prove bundling succeeded.
+
+The desktop now prevents workspace switching during requests, displays basic executable diagnostics and provider-specific permission descriptions, and offers Stop. Stop terminates the manager process but cleanup of provider grandchildren requires validation on macOS, Windows and Linux. Do not assume cancellation reverses file changes.
