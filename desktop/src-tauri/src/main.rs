@@ -151,12 +151,6 @@ fn open_provider_login(provider: String) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
         let command = format!("{binary} {}", args.join(" "));
-        let terminals: [(&str, Vec<&str>); 3] = [
-            ("x-terminal-emulator", vec!["-e", "sh", "-c", "exec \"$SHELL\" -ic '"]),
-            ("gnome-terminal", vec!["--", "sh", "-c", ""]),
-            ("konsole", vec!["-e", "sh", "-c", ""]),
-        ];
-        let _ = terminals; // platform terminal support below uses fixed executable/args.
         let launch = Command::new("x-terminal-emulator").args(["-e", "sh", "-c", &format!("{command}; exec sh")]).spawn()
             .or_else(|_| Command::new("gnome-terminal").args(["--", "sh", "-c", &format!("{command}; exec sh")]).spawn())
             .or_else(|_| Command::new("konsole").args(["-e", "sh", "-c", &format!("{command}; exec sh")]).spawn())
