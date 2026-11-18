@@ -165,7 +165,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     if let Err(message) = result.as_ref() {
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
     }
-    let stderr = stderr_task.await.unwrap_or_default();
+    let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
     if result.as_ref().is_ok_and(|status| !status.success()) {
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":stderr}}));
     }
