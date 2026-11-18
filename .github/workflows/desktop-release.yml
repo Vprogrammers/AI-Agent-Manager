@@ -31,7 +31,7 @@ jobs:
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]] || exit 1
           git rev-parse -q --verify "refs/tags/$TAG" >/dev/null
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - uses: actions/setup-node@v4
@@ -79,7 +79,7 @@ jobs:
   publish:
     name: Publish pre-release
     needs: build-macos
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
