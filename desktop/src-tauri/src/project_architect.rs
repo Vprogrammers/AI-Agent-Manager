@@ -1,7 +1,7 @@
 use std::{fs, path::{Path, PathBuf}};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct Proposal {
     pub path: String,
@@ -88,8 +88,8 @@ pub fn plan(root: &Path) -> Result<ProjectPlan, String> {
     if !root.is_dir() { return Err("Not a directory".into()); }
     let tags = stack(&root);
     let mut candidates = vec![
-        ("AGENTS.md".to_string(), managed("Project instructions for Codex", &tags), "Codex project guidance"),
-        ("CLAUDE.md".to_string(), managed("Project instructions for Claude Code", &tags), "Claude Code project guidance"),
+        ("AGENTS.md".to_string(), managed("Project instructions for Codex", &tags), "Codex project guidance".to_string()),
+        ("CLAUDE.md".to_string(), managed("Project instructions for Claude Code", &tags), "Claude Code project guidance".to_string()),
     ];
     let workflow = "1. Inspect the current repository structure, configuration and existing instructions.\n2. Identify the smallest safe change and the relevant modules.\n3. Implement using established conventions, then run targeted tests.\n4. Report actual results, unresolved risks and changed files.";
     let steps = format!("{}\n\nProject technologies: {}.", workflow, tags.join(", "));

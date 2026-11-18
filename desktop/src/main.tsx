@@ -311,9 +311,9 @@ function App() {
           try {
             const selected=architect.proposals.filter(p=>architectSelection.includes(p.path));
             const written=await invoke<string[]>('architect_apply',{root,proposals:selected});
-            setArchitectSuccess('Applied: '+written.join(', '));
             await scanAiConfig(root);
             await scanArchitect(root);
+            setArchitectSuccess('Applied: '+written.join(', '));
           } catch(e){setArchitectError(String(e));}
           finally{setArchitectLoading(false);}
         }}>Approve and apply selected ({architectSelection.length})</button>}
