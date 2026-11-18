@@ -34,14 +34,16 @@ fn github_clone(repository: String, destination: String) -> Result<String, Strin
 
 
 #[tauri::command]
-async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String) -> Result<(), String> {
+async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
     if provider != "claude" && provider != "codex" { return Err("Invalid provider".into()); }
     if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
+    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
     let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
     let mut child = tokio::process::Command::new("aam");
+    child.env("AAM_PERMISSION_MODE", &permission);
     child.arg(&provider).arg("--root").arg(&path).arg("--desktop-jsonl")
         .arg("--ui").arg("classic").arg("--prompt").arg(&prompt)
         .stdout(std::process::Stdio::piped())

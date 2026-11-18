@@ -51,14 +51,29 @@ def save(path, state):
         tmp.unlink(missing_ok=True)
 
 def build_command(tool, model, session_id, prompt):
+    permission = os.environ.get('AAM_PERMISSION_MODE', 'default')
+    if permission not in ('default', 'read-only', 'workspace-write', 'full-access'):
+        raise ValueError('Invalid AAM_PERMISSION_MODE')
     if tool == 'claude':
         cmd = ['claude', '-p', '--output-format', 'json']
+        if permission == 'workspace-write':
+            cmd += ['--permission-mode', 'acceptEdits']
+        elif permission == 'full-access':
+            cmd += ['--dangerously-skip-permissions']
+        elif permission == 'read-only':
+            cmd += ['--allowedTools', 'Read,Glob,Grep']
         if session_id:
             cmd += ['--resume', session_id]
         if model:
             cmd += ['--model', model]
         return cmd + [prompt]
     cmd = ['codex', 'exec']
+    if permission == 'read-only':
+        cmd += ['--sandbox', 'read-only']
+    elif permission == 'workspace-write':
+        cmd += ['--sandbox', 'workspace-write']
+    elif permission == 'full-access':
+        cmd += ['--dangerously-bypass-approvals-and-sandbox']
     if session_id:
         cmd += ['resume', session_id]
     if model:
