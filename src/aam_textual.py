@@ -3,7 +3,7 @@ import json
 import shutil
 from pathlib import Path
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll, Horizontal
+from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual.widgets import Header, Footer, Static, TextArea, Markdown, Button
 from textual.binding import Binding
 from textual import work
@@ -21,25 +21,30 @@ class AgentApp(App):
         Binding('ctrl+q', 'quit', 'Quit', show=True),
     ]
     CSS = """
-    Screen { background: #11151b; color: #e7edf5; }
-    #status { height: 3; padding: 1 2; background: #202833; }
-    #history { height: 1fr; padding: 1 2; }
-    .user { margin: 1 0; padding: 1 2; background: #242d39; }
-    .agent { margin: 1 0; padding: 1 2; background: #1b222b; height: auto; }
-    .agent.claude { border: round #d78b65; }
-    .agent.codex { border: round #35b9ad; }
-    #status.claude { border-left: thick #d78b65; background: #30231f; }
-    #status.codex { border-left: thick #35b9ad; background: #172d2c; }
-    #composer.claude { border: round #d78b65; }
-    #composer.codex { border: round #35b9ad; }
-    #send.claude { background: #a95d3d; }
-    #send.codex { background: #168d83; }
-    .steps { color: #8e9aab; padding: 0 1; }
+    Screen { background: #14171c; color: #dce2ea; }
+    Header { background: #14171c; color: #9ba8b9; height: 1; }
+    Footer { background: #14171c; color: #7d8999; }
+    #status { height: 2; padding: 0 2; color: #a9b5c4; background: #14171c; }
+    #status.claude { border-left: solid #d78b65; }
+    #status.codex { border-left: solid #35b9ad; }
+    #history { height: 1fr; padding: 0 2; scrollbar-size: 1 1; }
+    .user { margin: 1 0 0 0; padding: 1 1; background: #232831; color: #e9edf4; height: auto; }
+    .agent { margin: 0 0 1 0; padding: 0 1 1 2; background: #14171c; height: auto; border-left: solid #35b9ad; }
+    .agent.claude { border-left: solid #d78b65; }
+    .agent.codex { border-left: solid #35b9ad; }
+    .agent-label { height: auto; margin: 1 0 0 0; color: #8c9aa9; }
+    .answer { height: auto; margin: 0; padding: 0; background: #14171c; }
+    .steps { color: #8996a5; padding: 0 1 0 2; margin: 0; height: auto; }
     .hidden { display: none; }
-    #composer { height: 6; margin: 0 2; border: round #65738a; }
-    #actions { height: 3; padding: 0 2; }
-    #hint { width: 1fr; color: #93a2b5; padding: 1 0; }
-    Button { min-width: 10; }
+    #composer-shell { height: 6; margin: 0 2; border: round #5a6574; background: #1e232b; }
+    #composer-shell.claude { border: round #d78b65; }
+    #composer-shell.codex { border: round #35b9ad; }
+    #composer { height: 1fr; margin: 0 1; border: none; background: #1e232b; color: #f0f3f7; }
+    #composer:focus { border: none; }
+    #composer-info { height: 1; padding: 0 2; color: #8794a5; background: #1e232b; }
+    #actions { height: 1; margin: 0 2; }
+    #hint { width: 1fr; color: #7e8b9c; }
+    #send { display: none; }
     """
     def __init__(self, root, tool, execute, command, model):
         super().__init__()
@@ -59,10 +64,11 @@ class AgentApp(App):
         yield Header()
         yield Static('', id='status')
         yield VerticalScroll(id='history')
-        yield TextArea(id='composer', language=None, soft_wrap=True)
+        with Vertical(id='composer-shell'):
+            yield TextArea(id='composer', language=None, soft_wrap=True)
+            yield Static('Enter text · Ctrl+Enter to send', id='composer-info')
         with Horizontal(id='actions'):
-            yield Static('Ctrl+Enter Send  ·  Ctrl+T Agent  ·  Ctrl+O Steps  ·  Ctrl+D Diff', id='hint')
-            yield Button('Send', id='send', variant='primary')
+            yield Static('Ctrl+Enter Send   Ctrl+T Agent   Ctrl+O Steps   Ctrl+D Diff', id='hint')
         yield Footer()
 
     def on_mount(self):
@@ -71,13 +77,15 @@ class AgentApp(App):
 
     def refresh_status(self, usage=None):
         color = COLORS[self.tool]
-        for selector in ('#status', '#composer', '#send'):
+        for selector in ('#status', '#composer-shell'):
             widget = self.query_one(selector)
             widget.remove_class('claude', 'codex')
             widget.add_class(self.tool)
         self.query_one('#status', Static).update(
             f'[{color}][b]{self.tool.upper()}[/b][/]  ·  {self.model_name or "CLI default"}'
-            f'   |   {self.root.name}   |   {token_summary(usage or {})}')
+            f'   ·   {self.root.name}   ·   {token_summary(usage or {})}')
+        self.query_one('#composer-info', Static).update(
+            f'{self.tool.upper()} · {self.model_name or "CLI default"}  |  Ctrl+Enter send')
 
     def append(self, widget):
         history = self.query_one('#history', VerticalScroll)
@@ -102,11 +110,11 @@ class AgentApp(App):
         if prompt.startswith('/'):
             self.execute_command(prompt)
             return
-        self.append(Static(prompt, classes='user'))
+        self.append(Static('› ' + prompt, classes='user'))
         self.busy = True
         self.current_tool = self.tool
         self.events = []
-        self.active_steps = Static('Waiting for provider events…', classes='steps')
+        self.active_steps = Static('  Working · waiting for provider events…', classes='steps')
         self.append(self.active_steps)
         self.run_request(prompt)
 
@@ -125,7 +133,7 @@ class AgentApp(App):
     def record_step(self, label):
         self.events.append(label)
         if self.active_steps:
-            self.active_steps.update('\n'.join('• ' + s for s in self.events[-12:]))
+            self.active_steps.update('\n'.join('  · ' + step for step in self.events[-5:]))
 
     def complete(self, result, error):
         self.busy = False
@@ -142,11 +150,10 @@ class AgentApp(App):
         self.model_name = model
         self.refresh_status(usage)
         color = COLORS[tool]
-        panel = VerticalScroll(classes='agent ' + tool)
+        panel = Vertical(classes='agent ' + tool)
         self.append(panel)
-        panel.mount(Static(f'[{color}][b]{tool.upper()}[/b][/]  ·  {model}  ·  {token_summary(usage)}'))
-        panel.mount(Markdown(answer or '(Empty response)'))
-        panel.styles.height = 'auto'
+        panel.mount(Static(f'[{color}][b]{tool.upper()}[/b][/]  ·  {model}  ·  {token_summary(usage)}', classes='agent-label'))
+        panel.mount(Markdown(answer or '(Empty response)', classes='answer'))
         self.query_one('#composer', TextArea).focus()
 
     def action_toggle_steps(self):
