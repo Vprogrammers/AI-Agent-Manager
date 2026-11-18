@@ -2,6 +2,14 @@
 use std::{path::{Path, PathBuf}, process::Command};
 
 fn aam_executable() -> Result<PathBuf, String> {
+    // Tauri installs the sidecar next to the desktop executable.
+    // In development, continue to support the local launcher.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let sidecar = parent.join(if cfg!(windows) { "aam-engine.exe" } else { "aam-engine" });
+            if sidecar.is_file() { return Ok(sidecar); }
+        }
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let local = PathBuf::from(home).join(".local/bin/aam");
         if local.is_file() { return Ok(local); }
@@ -12,7 +20,7 @@ fn aam_executable() -> Result<PathBuf, String> {
             if candidate.is_file() { return Ok(candidate); }
         }
     }
-    Err("AAM CLI not found. Install it with scripts/install.sh, then restart the app.".into())
+    Err("Bundled AAM engine not found. For development, run scripts/install.sh; for release, rebuild the installer.".into())
 }
 
 use tauri::Emitter;

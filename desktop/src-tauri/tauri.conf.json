@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run bundle:engine",
     "frontendDist": "../dist"
   },
   "app": {
@@ -32,9 +32,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "targets": [
-      "dmg",
-      "app"
+    "targets": "all",
+    "externalBin": [
+      "binaries/aam-engine"
     ]
   }
 }

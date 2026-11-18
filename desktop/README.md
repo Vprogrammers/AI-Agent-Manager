@@ -51,3 +51,21 @@ The GUI now searches `~/.local/bin/aam` before PATH because Finder does not reli
 **This is not a self-contained installer**: the installed app still requires Python 3, Git, a working AAM launcher pointing at an accessible repository checkout, and an authenticated Claude or Codex CLI.
 GitHub clone also requires `gh`. Distribution to another Mac needs a bundled engine and dependency discovery; public distribution also needs Apple code signing and notarization.
 Windows and Linux packaging are not yet enabled or verified. Do not ship this as a cross-platform release.
+
+## Self-contained AAM engine (packaged desktop)
+
+Release builds package the Python AAM orchestration engine as a PyInstaller one-file sidecar. They **do not require** a separately installed AAM CLI or Python runtime. Build on each target OS and architecture (cross-compiling a PyInstaller executable is not supported).
+
+```bash
+python3 -m pip install pyinstaller
+cd desktop
+npm ci
+npm run icons
+npm run tauri build
+```
+
+The Tauri build hook runs `npm run bundle:engine` to generate `src-tauri/binaries/aam-engine-<rust-target-triple>` and embeds it in the installer. Installed apps look for the bundled engine beside their executable; development mode retains the legacy `~/.local/bin/aam` fallback.
+
+**External requirements remain:** Git, Claude Code and/or Codex CLI, and authentication for the chosen agent. GitHub cloning additionally requires `gh`. GUI-launched macOS apps may not inherit shell PATH for these external tools; dependency discovery and setup UI remain to be implemented. The application is not yet a verified one-click experience on a fresh machine.
+
+macOS public distribution requires signing and notarization. Windows/Linux builds require platform CI, signing where applicable, and verification. Do not publish unsigned installers as trusted releases.
