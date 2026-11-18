@@ -192,37 +192,42 @@ async fn install_provider_cli(provider: String) -> Result<String, String> {
     Ok(format!("{provider} CLI installation completed. Recheck status; restart the app if PATH changed."))
 }
 
+// Provider CLI owns browser OAuth and credential storage. The desktop app only
+// starts the login process; it never receives passwords, tokens or auth output.
 #[tauri::command]
-fn open_provider_login(provider: String) -> Result<String, String> {
+async fn open_provider_login(provider: String) -> Result<String, String> {
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
         "claude" => ("claude", &["auth", "login"]),
         "codex" => ("codex", &["login"]),
         _ => return Err("Unsupported provider".into()),
     };
-    // Login must be interactive: open the OS terminal, never capture its credentials.
-    #[cfg(target_os = "macos")]
-    {
-        let command = format!("{binary} {}", args.join(" "));
-        let script = format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{command}\"");
-        let status = Command::new("osascript").args(["-e", &script]).status().map_err(|_| "Cannot open Terminal".to_string())?;
-        if !status.success() { return Err("Terminal did not start".into()); }
+    let executable = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).flat_map(|p| {
+            let mut candidates = vec![p.join(binary)];
+            if cfg!(windows) {
+                for ext in ["exe", "cmd", "bat"] {
+                    candidates.push(p.join(format!("{binary}.{ext}")));
+                }
+            }
+            candidates
+        }).find(|p| p.is_file())
+    }).ok_or("Provider CLI not found. Recheck installation first.")?;
+    let mut command = tokio::process::Command::new(executable);
+    command.args(args).stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| "Could not start provider login".to_string())?;
+    // Give the CLI time to reject unsupported headless login. Browser-based OAuth
+    // is launched by the provider CLI; no external terminal is opened.
+    match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) if !status.success() => Err("Provider CLI requires an interactive login session. In-app OAuth is not supported by this CLI version.".into()),
+        Ok(Err(_)) => Err("Provider login process failed".into()),
+        Ok(Ok(_)) => Ok("Provider login completed. Recheck authentication.".into()),
+        Err(_) => {
+            tokio::spawn(async move { let _ = tokio::time::timeout(std::time::Duration::from_secs(300), child.wait()).await; });
+            Ok("Provider login started. Complete authentication in your browser, then recheck.".into())
+        }
     }
-    #[cfg(target_os = "windows")]
-    {
-        let status = Command::new("cmd").args(["/C", "start", "cmd", "/K", &format!("{binary} {}", args.join(" "))])
-            .status().map_err(|_| "Cannot open Command Prompt".to_string())?;
-        if !status.success() { return Err("Command Prompt did not start".into()); }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let command = format!("{binary} {}", args.join(" "));
-        let launch = Command::new("x-terminal-emulator").args(["-e", "sh", "-c", &format!("{command}; exec sh")]).spawn()
-            .or_else(|_| Command::new("gnome-terminal").args(["--", "sh", "-c", &format!("{command}; exec sh")]).spawn())
-            .or_else(|_| Command::new("konsole").args(["-e", "sh", "-c", &format!("{command}; exec sh")]).spawn())
-            .map_err(|_| "No supported terminal found. Install a terminal emulator.".to_string())?;
-        drop(launch);
-    }
-    Ok("Login opened in your system terminal. Complete it there, then recheck.".into())
 }
 
 #[derive(Serialize)]
