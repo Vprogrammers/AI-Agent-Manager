@@ -66,3 +66,6 @@ aside select{width:100%;padding:11px 12px;border:1px solid #455260;border-radius
 .setup-needed{color:#e5c181;font-size:11px}
 .setup-actions{justify-content:flex-end;flex-wrap:wrap;margin:12px 0}
 @media(max-width:600px){.setup-providers{grid-template-columns:1fr}.setup-dialog{padding:16px}}
+
+.setup-terminal{background:#090f17;color:#d8e6e8;border:1px solid #46515f;border-radius:8px;padding:12px;min-height:100px;max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 monospace}
+.setup-terminal-input{display:flex;gap:8px;margin-top:8px}.setup-terminal-input input{flex:1;min-width:0;background:#101821;color:#fff;border:1px solid #46515f;border-radius:6px;padding:8px}
