@@ -2,6 +2,7 @@
 use std::{path::{Path, PathBuf}, process::Command, sync::{Arc,Mutex}};
 use std::collections::HashMap;
 use tauri::Manager;
+mod project_architect;
 
 fn configure_agent_path() {
     // Finder/Dock launches often lack the user's interactive shell PATH.
@@ -235,8 +236,19 @@ fn project_ai_config(root: String) -> Result<Vec<AiConfigItem>, String> {
     Ok(items)
 }
 
+
+#[tauri::command]
+fn architect_preview(root: String) -> Result<project_architect::ProjectPlan, String> {
+    project_architect::plan(Path::new(&root))
+}
+
+#[tauri::command]
+fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) -> Result<Vec<String>, String> {
+    project_architect::apply(Path::new(&root), proposals)
+}
+
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, cancel_prompt])
+    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
