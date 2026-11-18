@@ -26,3 +26,7 @@ footer .send-button.claude:not(:disabled):hover{background:#ecaa88;box-shadow:0 
 footer .send-button.codex:not(:disabled){background:#35b9ad;border-color:#35b9ad;color:#101b20}
 footer .send-button.codex:not(:disabled):hover{background:#58d6c9;box-shadow:0 0 0 3px rgba(53,185,173,.18)}
 @media(max-width:700px){.app{grid-template-rows:minmax(0,auto) minmax(0,1fr)}.app>aside{max-height:38dvh}}
+
+/* Composer focus follows the selected (or running) agent. */
+footer.composer.claude textarea:focus{border-color:#d78b65;outline:2px solid rgba(215,139,101,.65);outline-offset:1px;box-shadow:0 0 0 4px rgba(215,139,101,.12)}
+footer.composer.codex textarea:focus{border-color:#35b9ad;outline:2px solid rgba(53,185,173,.65);outline-offset:1px;box-shadow:0 0 0 4px rgba(53,185,173,.12)}
