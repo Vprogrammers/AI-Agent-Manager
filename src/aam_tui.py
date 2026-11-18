@@ -92,6 +92,22 @@ def step_detail(event):
             return f'{label}: {", ".join(paths[:2])[:120]}'
     return label
 
+def streamed_answer(event):
+    """Return provider-visible answer snapshots only, never reasoning/tool output."""
+    if not isinstance(event, dict):
+        return None
+    item = event.get('item')
+    if isinstance(item, dict) and item.get('type') == 'agent_message':
+        if event.get('type') in ('item.updated', 'item.completed'):
+            text = item.get('text')
+            return text if isinstance(text, str) else None
+    if event.get('type') == 'assistant' and isinstance(event.get('message'), dict):
+        blocks = event['message'].get('content') or []
+        parts = [b.get('text') for b in blocks if isinstance(b, dict) and b.get('type') == 'text']
+        if parts and all(isinstance(p, str) for p in parts):
+            return ''.join(parts)
+    return None
+
 class RichTurn:
     def __init__(self, tool, model):
         from rich.console import Console

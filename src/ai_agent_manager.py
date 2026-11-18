@@ -418,6 +418,10 @@ def main():
                 for turn in turns:
                     app.append(Static(f"{turn.get('tool', '?').upper()} · {turn.get('utc', '')}\n"
                                       f"› {turn.get('prompt', '')}\n{turn.get('answer', '')}"))
+            elif command == '/updates':
+                from aam_updates import check_updates
+                from textual.widgets import Static
+                app.append(Static(check_updates(root)))
             elif command == '/tokens':
                 from textual.widgets import Static
                 app.append(Static('Last turn: ' + json.dumps(state.get('last_usage', {})) +

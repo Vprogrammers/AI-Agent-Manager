@@ -8,7 +8,7 @@ from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual.widgets import Header, Footer, Static, TextArea, Markdown, Button
 from textual.binding import Binding
 from textual import work
-from aam_tui import event_label, token_summary, provider_model, provider_usage, step_detail
+from aam_tui import event_label, token_summary, provider_model, provider_usage, step_detail, streamed_answer
 
 COLORS = {'claude': '#D78B65', 'codex': '#35B9AD'}
 
@@ -85,6 +85,9 @@ class AgentApp(App):
         self.last_usage = {}
         self.last_answer = None
         self.last_model = None
+        self.preview = None
+        self.preview_text = ''
+        self.command_candidates = ('/claude', '/codex', '/new', '/status', '/context', '/analytics', '/checkpoint', '/recover', '/history', '/tokens', '/diff', '/updates', '/help', '/quit')
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -134,7 +137,10 @@ class AgentApp(App):
             self.exit()
             return
         if prompt.startswith('/'):
-            self.execute_command(prompt)
+            if prompt == '/help':
+                self.append(Static('Commands: ' + '  '.join(self.command_candidates)))
+            else:
+                self.execute_command(prompt)
             return
         self.active_prompt = Static('› ' + prompt, classes='user ' + self.tool)
         self.append(self.active_prompt)
@@ -143,6 +149,8 @@ class AgentApp(App):
         self.current_tool = self.tool
         self.events = []
         self.live_usage = {}
+        self.preview = None
+        self.preview_text = ''
         self.active_steps = Static('  Working · waiting for provider events…', classes='steps')
         self.append(self.active_steps)
         self.run_request(prompt)
@@ -168,6 +176,13 @@ class AgentApp(App):
         usage = provider_usage(obj)
         if usage:
             self.live_usage.update(usage)
+        snapshot = streamed_answer(obj)
+        if snapshot is not None and snapshot != self.preview_text:
+            self.preview_text = snapshot
+            if self.preview is None:
+                self.preview = Static('', classes='steps')
+                self.append(self.preview)
+            self.preview.update(snapshot[-6000:])
         if label or model or usage:
             self.refresh_status(self.live_usage)
         if self.active_steps:
@@ -178,6 +193,9 @@ class AgentApp(App):
         self.cancel_event = None
         if self.active_steps:
             self.active_steps.set_class(not self.show_steps, 'hidden')
+        if self.preview is not None:
+            self.preview.remove()
+            self.preview = None
         if error:
             self.append(Static('Request failed: ' + error, classes='agent ' + self.current_tool))
             return
@@ -202,6 +220,15 @@ class AgentApp(App):
         panel.mount(Static(f'[{color}][b]{tool.upper()}[/b][/]  ·  {model}  ·  {token_summary(usage)}', classes='agent-label'))
         panel.mount(Markdown(answer or '(Empty response)', classes='answer'))
         self.query_one('#composer', TextArea).focus()
+
+    def on_text_area_changed(self, event: TextArea.Changed):
+        text = event.text_area.text
+        if text.startswith('/') and '\\n' not in text:
+            options = [cmd for cmd in self.command_candidates if cmd.startswith(text)]
+            self.query_one('#composer-info', Static).update('  '.join(options[:5]) or 'Unknown command')
+        else:
+            self.query_one('#composer-info', Static).update(
+                f'{self.tool.upper()} · Enter send · Ctrl+N new line · /help commands')
 
     def action_toggle_steps(self):
         self.show_steps = not self.show_steps

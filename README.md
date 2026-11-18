@@ -374,3 +374,15 @@ not displayed. Test the app in a real terminal before relying on it for edits.
 Press **Esc** during an active request to send SIGINT to the active CLI process group.
 A cancelled request is not automatically replayed. Inspect changed files before retrying.
 Cancellation is best-effort and may depend on the provider CLI responding to SIGINT.
+
+
+### Streaming and command discovery
+
+Codex `item.updated` answer snapshots and Claude assistant text events are shown as
+provisional live text when actually emitted. The final provider result replaces the
+preview. Tool output and private reasoning are never rendered as answer text.
+Typing `/` in the composer shows matching command suggestions; this is a hint,
+not a native completion menu. Use `/help` for available commands.
+
+Run `/updates` to check the Git checkout against its configured upstream branch.
+This is an explicit, network-dependent check; it does not auto-install releases.
