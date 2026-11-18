@@ -4,6 +4,29 @@ A lightweight, opt-in terminal bridge between **Claude Code** and **OpenAI Codex
 
 > **Important:** AAM is an orchestrator, not a permission sandbox. Claude and Codex can execute tools and modify your project according to their own settings. Review changes and permissions before running potentially destructive tasks.
 
+## Project AI Architect
+
+Project AI Architect inspects a Git checkout locally and proposes managed project instructions, a reviewer subagent and a workflow skill. No provider request is made during scanning. Generated content lives under `.ai-agent-manager/architect/`; existing `AGENTS.md` and `CLAUDE.md` are never modified.
+
+**Standalone CLI** (from the AAM checkout):
+
+```bash
+python3 src/project_ai_architect.py --root /path/to/project
+python3 src/project_ai_architect.py --root /path/to/project --json
+python3 src/project_ai_architect.py --root /path/to/project --approve
+```
+
+The default invocation previews full unified diffs. `--approve` prints the proposal and applies it; review the output before using it on important projects. To review and approve in **two distinct steps**, use an interactive AAM session:
+
+```text
+/architect
+/architect-apply
+```
+
+These commands work in both standard terminal mode and optional Textual UI. `/architect-apply` requires a preceding preview in the same session and rejects stale file changes. Generated files are tracked by a SHA-256 manifest; unmodified files from the older standalone generator are adopted automatically, while customized files are marked as conflicts and preserved. Static analysis is heuristic, not an AI-powered full architecture audit. Smart Router discovers the generated context paths; the provider CLIs may still require their native instructions setup to load them automatically.
+
+See [Project AI Architect details](docs/PROJECT_AI_ARCHITECT.md).
+
 ## 1. Requirements
 
 - macOS or Linux with a terminal; Python **3.10+** and Git.
