@@ -162,7 +162,11 @@ def refresh_apply(root, changes, approved=False):
     if not approved:
         raise PermissionError("Explicit approval required")
     root = Path(root).resolve()
-    # Validate every candidate before writing anything.
+    # Validate preview content and every candidate before writing anything.
+    current_desired = generated(root)
+    for item in changes:
+        if item["path"] not in MANAGED or item["content"] != current_desired.get(item["path"]):
+            raise RuntimeError("Project changed since preview")
     for item in changes:
         relative = item["path"]
         if relative not in MANAGED:
