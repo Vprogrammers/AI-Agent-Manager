@@ -448,17 +448,23 @@ def main():
                 from project_architect_refresh import refresh_plan, refresh_apply
                 from textual.widgets import Static
                 try:
-                    changes = refresh_plan(root)
                     if command == '/architect':
-                        summary = '\\n'.join(f"{c['status']}: {c['path']}" for c in changes)
-                        diffs = '\\n'.join(c['diff'] for c in changes if c['diff'])
-                        app.append(Static('Architect preview (no files changed):\\n' + summary + '\\n' + diffs[:18000]))
+                        app.architect_preview = refresh_plan(root)
+                        changes = app.architect_preview
+                        summary = '\n'.join(f"{c['status']}: {c['path']}" for c in changes)
+                        diffs = '\n'.join(c['diff'] for c in changes if c['diff'])
+                        app.append(Static('Architect preview (no files changed):\n' + summary + '\n' + diffs))
                         app.append(Static('Review changes, then enter /architect-apply to approve. Conflicts are preserved.'))
+                    elif app.architect_preview is None:
+                        app.append(Static('Run /architect first to preview the exact changes.'))
                     else:
+                        changes = app.architect_preview
                         written = refresh_apply(root, changes, approved=True)
+                        app.architect_preview = None
                         app.append(Static('Architect applied: ' + (', '.join(written) or 'no changes') +
-                                          '\\nConflicts preserved: ' + ', '.join(c['path'] for c in changes if c['status'] == 'conflict')))
+                                          '\nConflicts preserved: ' + ', '.join(c['path'] for c in changes if c['status'] == 'conflict')))
                 except (OSError, ValueError, RuntimeError) as error:
+                    app.architect_preview = None
                     app.append(Static('Architect error: ' + str(error)))
             elif command == '/diff':
                 diff = git(root, 'diff', '--stat') or 'No unstaged changes'
@@ -508,12 +514,33 @@ def main():
                        model_for(tool, '', os.environ) or 'CLI default')
         app.run()
         return 0
+    architect_preview = None
     while True:
         try:
             prompt = input(f'{tool}> ').strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        if prompt in ('/architect', '/architect-apply'):
+            from project_architect_refresh import refresh_plan, refresh_apply
+            try:
+                if prompt == '/architect':
+                    architect_preview = refresh_plan(root)
+                    for item in architect_preview:
+                        print(f"{item['status']}: {item['path']}")
+                        if item['diff']:
+                            print(item['diff'])
+                    print('Review changes, then enter /architect-apply to approve.')
+                elif architect_preview is None:
+                    print('Run /architect first to preview the exact changes.')
+                else:
+                    written = refresh_apply(root, architect_preview, approved=True)
+                    architect_preview = None
+                    print('Architect applied:', ', '.join(written) or 'none')
+            except (OSError, ValueError, RuntimeError) as error:
+                architect_preview = None
+                print('Architect error:', error, file=sys.stderr)
+            continue
         if prompt == '/recover':
             recovered = load_checkpoint(path.with_name('checkpoint.json'))
             print(json.dumps(recovered or {'error': 'No valid checkpoint'}, ensure_ascii=False, indent=2))
