@@ -1,5 +1,6 @@
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 type NodeStatus = { installed: boolean; detail: string; installer: string };
 
@@ -36,6 +37,9 @@ export default function AgentSetupWizard() {
   const [working, setWorking] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState('');
   const [authPending, setAuthPending] = React.useState(false);
+  const [terminalOutput, setTerminalOutput] = React.useState('');
+  const [terminalInput, setTerminalInput] = React.useState('');
+  const [terminalOpen, setTerminalOpen] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setChecking(true);
@@ -54,6 +58,22 @@ export default function AgentSetupWizard() {
   }, [dismissed]);
 
   React.useEffect(() => { void refresh(); }, [refresh]);
+  React.useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ text: string; finished: boolean }>('provider-login-output', event => {
+      if (disposed) return;
+      if (event.payload.text) setTerminalOutput(previous => (previous + event.payload.text).slice(-16000));
+      if (event.payload.finished) setTerminalOpen(false);
+    }).then(fn => { if (disposed) fn(); else unlisten = fn; }).catch(e => setError(String(e)));
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+  const sendTerminalInput = async () => {
+    try {
+      await invoke('login_pty_write', { input: terminalInput + '\\r' });
+      setTerminalInput('');
+    } catch (e) { setError(String(e)); }
+  };
   const ready = statuses.some(item => item.authenticated);
   const installNode = async () => {
     if (!window.confirm('Install Node.js and npm using ' + (node?.installer || 'the OS package manager') + '? This downloads software and may request administrator authorization.')) return;
@@ -67,6 +87,7 @@ export default function AgentSetupWizard() {
   const perform = async (id: 'claude' | 'codex', action: 'install' | 'login') => {
     if (action === 'install' && !window.confirm('Install ' + setup[id].name + ' globally using npm? This downloads software from the npm registry and changes your system environment.')) return;
     setWorking(id); setError(''); setNotice('');
+    if (action === 'login') { setTerminalOutput(''); setTerminalOpen(true); }
     try {
       const message = await invoke<string>(action === 'install' ? 'install_provider_cli' : 'open_provider_login', { provider: id });
       if (action === 'install') {
@@ -75,9 +96,11 @@ export default function AgentSetupWizard() {
         try {
           const login = await invoke<string>('open_provider_login', { provider: id });
           setNotice(message + ' ' + login);
+          setTerminalOutput(''); setTerminalOpen(true);
           setAuthPending(true);
         } catch (loginError) {
           setNotice(message + ' Login could not be started automatically; use Open login to retry.');
+          setTerminalOpen(false);
           setError(String(loginError));
         }
       } else {
@@ -85,7 +108,7 @@ export default function AgentSetupWizard() {
         setAuthPending(true);
       }
       await refresh();
-    } catch (e) { setError(String(e)); }
+    } catch (e) { setTerminalOpen(false); setError(String(e)); }
     finally { setWorking(null); }
   };
 
@@ -145,11 +168,20 @@ export default function AgentSetupWizard() {
             </div>;
           })}
         </div>
+        {(terminalOpen || terminalOutput) && <div className="setup-provider" aria-label="Embedded provider login terminal">
+          <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
+          <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
+          {terminalOpen && <form onSubmit={e => { e.preventDefault(); void sendTerminalInput(); }} className="setup-terminal-input">
+            <input aria-label="Terminal input" type="text" value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Enter CLI response, if requested" autoComplete="off" />
+            <button type="submit">Send</button>
+          </form>}
+          <p className="hint">OAuth may open your default browser. Never enter passwords or recovery codes in this terminal; authenticate on the provider's official page.</p>
+        </div>}
         <div className="setup-actions">
           <button type="button" onClick={() => void refresh()} disabled={checking}>{checking ? 'Checking…' : 'Recheck installation and login'}</button>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }}>{ready ? 'Continue' : 'Skip for now'}</button>
         </div>
-        <p className="hint">Node.js is installed using the OS package manager after confirmation. CLI installation runs through npm after confirmation. After CLI installation, the app starts provider login without opening a terminal and checks authentication automatically. Some CLI versions may require an interactive terminal; the app reports this limitation. Credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
+        <p className="hint">Node.js is installed using the OS package manager after confirmation. CLI installation runs through npm after confirmation. After CLI installation, the app starts an embedded interactive terminal and checks authentication automatically. Provider OAuth may require your default browser. Credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
       </section>
     </div>}
   </>;
