@@ -232,7 +232,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
     cmd = build_command(tool, model, sid, actual_prompt)
     before = repository_snapshot(root) if tool == 'claude' else None
     start = time.monotonic()
-    if tool == 'codex':
+    if tool == 'codex' and on_event is None:
         print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
     with profile_environment(profile, env) as runtime_env:
         if runner is stream_runner:
@@ -243,7 +243,8 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
     usage = usage_from_output(tool, completed.stdout)
     state['last_usage'] = usage
     record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed', profile, env.get('AAM_TASK_ID'))
-    print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
+    if on_event is None:
+        print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
     if completed.returncode:
         summary = limit_summary(tool, completed.stdout, completed.stderr)
         if summary:
@@ -269,7 +270,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
     state['history'] = state['history'][-12:]
     state['last_completed'] = {'tool': tool, 'session_id': new_sid, 'utc': datetime.now(timezone.utc).isoformat()}
     warning = after_turn(state, tool, usage, env, store_path(root).with_name('checkpoint.json'))
-    if warning:
+    if warning and on_event is None:
         print('[aam] Context warning: observed input tokens exceeded threshold; consider /checkpoint and /new when safe.', file=sys.stderr)
     return answer, model or 'CLI default'
 
@@ -314,8 +315,9 @@ def main():
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
             tool = pending
-            print(f'[aam] Automatically switching to {tool} after previous limit', file=sys.stderr)
-            show_agent_ready(tool, root)
+            if on_event is None:
+                print(f'[aam] Automatically switching to {tool} after previous limit', file=sys.stderr)
+                show_agent_ready(tool, root)
         for attempt in range(2):
             try:
                 if ns.ui == 'rich' and sys.stdout.isatty() and ns.prompt is None:
@@ -327,7 +329,8 @@ def main():
                     answer, model = run_turn(root, tool, prompt, state, on_event=on_event)
             except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
                 message = str(e)
-                print(f'[aam] {message}', file=sys.stderr)
+                if on_event is None:
+                    print(f'[aam] {message}', file=sys.stderr)
                 if isinstance(e, ProviderLimitError) or LIMIT.search(message):
                     other = 'codex' if tool == 'claude' else 'claude'
                     if shutil.which(other):
@@ -335,9 +338,11 @@ def main():
                         save(path, state)
                         if (attempt == 0 and isinstance(e, ProviderLimitError)
                                 and e.safe_retry and tool == 'claude'):
-                            print('[aam] Claude rejected before execution. Switching to Codex; retrying the same request once.', file=sys.stderr)
+                            if on_event is None:
+                                print('[aam] Claude rejected before execution. Switching to Codex; retrying the same request once.', file=sys.stderr)
                             tool = other
-                            show_agent_ready(tool, root)
+                            if on_event is None:
+                                show_agent_ready(tool, root)
                             continue
                         print(f'[aam] Next request uses {other}; automatic retry blocked because prior work cannot be ruled out.', file=sys.stderr)
                     else:
