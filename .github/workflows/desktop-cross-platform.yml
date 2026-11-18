@@ -76,12 +76,6 @@ jobs:
         working-directory: desktop
         shell: bash
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npm run tauri -- build --bundles ${{ matrix.bundles }}
       - name: Windows Authenticode sign built installers
         if: matrix.platform == 'windows'
@@ -108,7 +102,7 @@ jobs:
       - name: Collect artifacts
         shell: bash
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ github.event_name == 'pull_request' && 'desktop-v0.2.0-pr' || (github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name) }}
         run: |
           set -euo pipefail
           mkdir -p release-assets
