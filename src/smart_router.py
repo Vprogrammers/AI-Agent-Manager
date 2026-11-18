@@ -1,6 +1,7 @@
 """Deterministic, zero-LLM-call task router. Scores are heuristics, not quality guarantees."""
 import re
 import shutil
+from pathlib import Path
 
 TASKS = {
     "analysis": re.compile(r"\b(architect(?:ure)?|design|security|audit|review|research|plan|arhitektur|analiz|bezbednost|sigurnost)\b", re.I),
@@ -12,13 +13,22 @@ def classify(prompt):
     scores = {name: len(regex.findall(prompt)) for name, regex in TASKS.items()}
     return max(scores, key=lambda key: (scores[key], {"analysis": 2, "coding": 1, "docs": 0}[key])) if any(scores.values()) else "general"
 
-def route(prompt, state, env, available=None, mode="auto"):
+def project_context(root):
+    """Small local configuration hint; native CLIs load their own project instructions."""
+    if not root:
+        return []
+    root = Path(root)
+    return [name for name in ("AGENTS.md", "CLAUDE.md", ".agents/skills/project-workflow/SKILL.md", ".claude/skills/project-workflow/SKILL.md")
+            if (root / name).is_file()]
+
+def route(prompt, state, env, available=None, mode="auto", root=None):
     """Prefer existing native session to save context; no network or LLM call."""
     available = available if available is not None else {p for p in ("claude", "codex") if shutil.which(p)}
     available = set(available) & {"claude", "codex"}
     if not available:
         raise ValueError("Neither Claude Code nor Codex CLI is installed")
     task = classify(prompt)
+    configs = project_context(root)
     previous = state.get("last_tool")
     pending = state.get("pending_switch")
     if pending in available:
@@ -33,5 +43,5 @@ def route(prompt, state, env, available=None, mode="auto"):
         reason = f"Rule-based {task} routing; no additional model call"
     level = "high" if task == "analysis" else "low" if task == "docs" else "medium"
     configured = env.get(f"AAM_{provider.upper()}_{level.upper()}_MODEL", "").strip()
-    return {"provider": provider, "model": configured or "CLI default / existing session",
+    return {"provider": provider, "project_config": configs, "model": configured or "CLI default / existing session",
             "complexity": level, "task": task, "reason": reason, "mode": mode}

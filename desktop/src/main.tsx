@@ -13,6 +13,8 @@ function AiStatus({status,reason}: {status:AiConfigItem['claude'];reason:string}
   return <span className={'ai-status '+status} title={reason} aria-label={status+': '+reason}>{status==='supported'?'Compatible':status==='unsupported'?'Not native':'Unverified'}</span>;
 }
 
+type ArchitectProposal = { path:string; action:string; reason:string; before:string|null; after:string };
+type ArchitectPlan = { stack:string[]; proposals:ArchitectProposal[] };
 type GithubRepo = { nameWithOwner: string; isPrivate: boolean; description: string | null };
 type Message = { role: 'user' | 'assistant'; text: string; provider: Provider };
 const TOKEN_LABELS: Record<string,string> = {
@@ -83,6 +85,22 @@ function App() {
     catch(e) { setAiConfig([]); setAiConfigError(String(e)); }
     finally { setAiConfigLoading(false); }
   },[]);
+  const [architect, setArchitect] = React.useState<ArchitectPlan|null>(null);
+  const [architectOpen, setArchitectOpen] = React.useState(false);
+  const [architectLoading, setArchitectLoading] = React.useState(false);
+  const [architectSelection, setArchitectSelection] = React.useState<string[]>([]);
+  const [architectError, setArchitectError] = React.useState('');
+  const [architectSuccess, setArchitectSuccess] = React.useState('');
+  const scanArchitect = React.useCallback(async (path:string) => {
+    setArchitect(null); setArchitectSelection([]); setArchitectError(''); setArchitectSuccess('');
+    if (!path.trim()) return;
+    setArchitectLoading(true);
+    try {
+      const plan = await invoke<ArchitectPlan>('architect_preview',{root:path});
+      setArchitect(plan); setArchitectSelection(plan.proposals.map(p=>p.path));
+    } catch(e) { setArchitectError(String(e)); }
+    finally { setArchitectLoading(false); }
+  },[]);
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
@@ -119,7 +137,7 @@ function App() {
   React.useEffect(()=>{void refreshDiagnostics();},[root]);
   const selectWorkspace = (path: string) => {
     if (busy) { setError('Wait for the current request to finish or stop it before changing workspaces.'); return; }
-    setRoot(path); void scanAiConfig(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
+    setRoot(path); void scanAiConfig(path); void scanArchitect(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
     const next = [path, ...recent.filter(p => p !== path)].slice(0, 8);
     setRecent(next); localStorage.setItem(WORKSPACES_KEY, JSON.stringify(next));
   };
@@ -269,6 +287,37 @@ function App() {
           <p>{item.codexReason}</p>
         </div>)}</div>}
         <small>Compatibility is inferred from conventional file locations, not verified runtime loading. Skills are activated conditionally. Global settings, nested AGENTS.md/CLAUDE.md and custom configuration may change behavior.</small>
+      </>}
+    </div><div className="ai-config-panel">
+      <div className="usage-heading"><strong>Project AI Architect</strong><button onClick={()=>setArchitectOpen(v=>!v)} aria-expanded={architectOpen}>{architectOpen?'Hide':'Show'}</button></div>
+      {architectOpen&&<>
+        <p className="hint">Detect project technologies and propose agent instructions, skills and a review subagent. No files change until you approve.</p>
+        <button disabled={!root||busy||architectLoading} onClick={()=>void scanArchitect(root)}>{architectLoading?'Scanning…':'Rescan project'}</button>
+        {architect?.stack.length ? <p className="hint">Detected: {architect.stack.join(' · ')}</p> : null}
+        {architectError&&<p className="ai-config-error" role="alert">{architectError}</p>}
+        {architectSuccess&&<p className="hint" role="status">{architectSuccess}</p>}
+        {architect&&!architect.proposals.length&&<p className="hint">All generated configuration is up to date.</p>}
+        {architect?.proposals.map(item=><div className="architect-proposal" key={item.path}>
+          <label className="architect-select"><input type="checkbox" checked={architectSelection.includes(item.path)} onChange={e=>setArchitectSelection(old=>e.target.checked?[...old,item.path]:old.filter(p=>p!==item.path))}/><strong>{item.action.toUpperCase()} {item.path}</strong></label>
+          <p className="hint">{item.reason}</p>
+          <details><summary>Review proposed change</summary><div className="architect-diff">
+            {item.before!==null&&<><strong>Existing file (preserved outside managed section)</strong><pre>{item.before}</pre></>}
+            <strong>Proposed complete file</strong><pre>{item.after}</pre>
+          </div></details>
+        </div>)}
+        {architect&&architect.proposals.length>0&&<button disabled={busy||architectLoading||architectSelection.length===0} onClick={async()=>{
+          if (!window.confirm('Apply '+architectSelection.length+' reviewed AI configuration changes to this workspace?')) return;
+          setArchitectLoading(true); setArchitectError(''); setArchitectSuccess('');
+          try {
+            const selected=architect.proposals.filter(p=>architectSelection.includes(p.path));
+            const written=await invoke<string[]>('architect_apply',{root,proposals:selected});
+            setArchitectSuccess('Applied: '+written.join(', '));
+            await scanAiConfig(root);
+            await scanArchitect(root);
+          } catch(e){setArchitectError(String(e));}
+          finally{setArchitectLoading(false);}
+        }}>Approve and apply selected ({architectSelection.length})</button>}
+        <small>Proposals are deterministic and do not invoke an AI model. Review all changes. Existing configuration is not deleted; generated sections may be updated after approval.</small>
       </>}
     </div><div className="usage-panel">
       <div className="usage-heading"><strong>Usage statistics</strong><button onClick={()=>setUsageExpanded(v=>!v)} aria-expanded={usageExpanded}>{usageExpanded?'Hide':'Show'}</button></div>

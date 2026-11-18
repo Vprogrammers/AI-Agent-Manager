@@ -351,7 +351,7 @@ def main():
     def execute(prompt, on_event=None, on_result=None, cancel_event=None):
         nonlocal tool
         if ns.tool in ('auto', 'balanced'):
-            decision = smart_route(prompt, state, os.environ, mode=ns.tool)
+            decision = smart_route(prompt, state, os.environ, mode=ns.tool, root=root)
             tool = decision['provider']
             if ns.desktop_jsonl:
                 emit_desktop('routing', **decision)
