@@ -204,6 +204,16 @@ struct LoginSession(Mutex<Option<LoginWriter>>);
 struct LoginOutput { text: String, finished: bool }
 
 #[tauri::command]
+fn focus_after_login(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window unavailable")?;
+    if window.is_minimized().unwrap_or(false) {
+        window.unminimize().map_err(|e| e.to_string())?;
+    }
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn login_pty_write(input: String, state: tauri::State<'_, LoginSession>) -> Result<(), String> {
     if input.len() > 4096 { return Err("Input too long".into()); }
     let mut session = state.0.lock().map_err(|_| "Login session unavailable")?;
@@ -468,6 +478,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
