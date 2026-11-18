@@ -101,6 +101,52 @@ fn desktop_diagnostics(root: String) -> Vec<Diagnostic> {
     result
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderSetup {
+    id: String,
+    installed: bool,
+    authenticated: bool,
+    auth_status: String,
+    detail: String,
+}
+
+#[tauri::command]
+async fn provider_setup_status() -> Vec<ProviderSetup> {
+    let mut result = Vec::new();
+    for (id, binary, args) in [
+        ("claude", "claude", vec!["auth", "status"]),
+        ("codex", "codex", vec!["login", "status"]),
+    ] {
+        let executable = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).map(|p| p.join(binary))
+                .find(|p| p.is_file())
+        });
+        let Some(executable) = executable else {
+            result.push(ProviderSetup { id: id.into(), installed: false, authenticated: false,
+                auth_status: "missing".into(), detail: "CLI not found in PATH".into() });
+            continue;
+        };
+        // Never return stdout/stderr: authentication diagnostics may contain private data.
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::process::Command::new(&executable)
+                .args(&args).stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).kill_on_drop(true).status(),
+        ).await;
+        let (authenticated, auth_status, detail) = match status {
+            Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
+            Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
+            Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
+            Err(_) => (false, "unknown", "Authentication check timed out"),
+        };
+        result.push(ProviderSetup { id: id.into(), installed: true, authenticated,
+            auth_status: auth_status.into(), detail: detail.into() });
+    }
+    result
+}
+
 #[tauri::command]
 fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -> Result<(), String> {
     let requests = state.0.lock().map_err(|_|"Request state unavailable")?;
@@ -249,6 +295,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
