@@ -15,6 +15,17 @@ def event_label(event):
     names = {'command_execution': 'Command', 'file_change': 'File changes',
              'mcp_tool_call': 'Tool call', 'web_search': 'Web search',
              'agent_message': 'Response'}
+    if kind == 'content_block_start':
+        block = event.get('content_block') or {}
+        if block.get('type') in ('tool_use', 'server_tool_use'):
+            name = block.get('name')
+            return 'Tool · ' + name if isinstance(name, str) and name else 'Tool started'
+    if kind == 'content_block_stop':
+        return 'Tool or content block completed'
+    if kind == 'message_start':
+        return 'Claude response started'
+    if kind == 'message_stop':
+        return 'Claude response completed'
     if kind == 'turn.started':
         return 'Turn started'
     if kind == 'turn.failed':
