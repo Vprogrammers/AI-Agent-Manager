@@ -22,7 +22,7 @@ class PromptEditor(TextArea):
         self.app.action_send()
 
     def action_insert_newline(self):
-        self.insert('\\n')
+        self.insert('\n')
 
 
 class AgentApp(App):
