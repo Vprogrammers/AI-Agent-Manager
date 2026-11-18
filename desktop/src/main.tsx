@@ -6,6 +6,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 
 type Provider = 'claude' | 'codex';
+type RoutingMode = Provider | 'auto' | 'balanced';
 
 type AiConfigItem = { name:string; path:string; kind:string; claude:'supported'|'unsupported'|'unknown'; codex:'supported'|'unsupported'|'unknown'; claudeReason:string; codexReason:string };
 function AiStatus({status,reason}: {status:AiConfigItem['claude'];reason:string}) {
@@ -83,7 +84,7 @@ function App() {
     finally { setAiConfigLoading(false); }
   },[]);
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
-  const [provider, setProvider] = React.useState<Provider>('claude');
+  const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
   const [permission, setPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
   const [messages, setMessages] = React.useState<Message[]>([]);
@@ -169,9 +170,9 @@ function App() {
     const requestRoot = root;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
     setPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
-    setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider);
+    setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider === 'codex' ? 'codex' : 'claude');
     setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
-    setMessages(m => [...m, { role: 'user', text, provider: requestedProvider }]);
+    setMessages(m => [...m, { role: 'user', text, provider: requestedProvider === 'codex' ? 'codex' : 'claude' }]);
     const requestStarted = Date.now();
     let completed = false;
     let streamText = '';
@@ -184,8 +185,10 @@ function App() {
         if (payload.requestId !== id) return;
         const data = payload.data;
         const kind = data.kind;
-        if (kind === 'provider' && (data.provider === 'claude' || data.provider === 'codex')) {
-          setLastProvider(data.provider); setLiveProvider(data.provider); setProvider(data.provider); setActivity('Running '+data.provider);
+        if (kind === 'routing') {
+          setActivity('Auto: '+String(data.reason || 'Routing')+' · '+String(data.model || 'CLI default'));
+        } else if (kind === 'provider' && (data.provider === 'claude' || data.provider === 'codex')) {
+          setLastProvider(data.provider); setLiveProvider(data.provider); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(data.provider); setActivity('Running '+data.provider);
         } else if (kind === 'activity') {
           const ev = data.event as Record<string,unknown> | undefined;
           if (ev) {
@@ -248,11 +251,11 @@ function App() {
       });
       await invoke<void>('run_prompt', {requestId:id,root:requestRoot,provider:requestedProvider,prompt:text,permission});
       if (!completed && !failed) setError('Agent finished without a structured result. Check CLI version.');
-    } catch (e) { setError(String(e)); setPrompt(current => current || text); if (streamText) { setMessages(m=>[...m,{role:'assistant',text:streamText+'\n\n[Partial response — interrupted]',provider:requestedProvider}]);setLiveText(''); } }
+    } catch (e) { setError(String(e)); setPrompt(current => current || text); if (streamText) { setMessages(m=>[...m,{role:'assistant',text:streamText+'\n\n[Partial response — interrupted]',provider:requestedProvider === 'codex' ? 'codex' : 'claude'}]);setLiveText(''); } }
     finally { unlisten?.(); setBusy(false); setStopping(false); setStartedAt(null); }
   };
   return <div className="app">
-    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><label>Workspace</label><button className="open-folder" disabled={busy} onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" disabled={busy} onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" disabled={busy} placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} disabled={busy} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">{provider==='codex'?'Codex read-only and workspace-write use CLI filesystem sandboxing. Full access bypasses sandbox and approvals.':'Claude read-only restricts allowed tool names, not an OS sandbox. Workspace write uses acceptEdits (other operations may still be allowed). Full access skips permissions.'}</p><label>Agent</label><div className="agents"><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Provider limits may require a manual continuation when prior work cannot be ruled out.</p><div className="ai-config-panel"><div className="usage-heading"><strong>Setup & Diagnostics</strong><button onClick={()=>setDiagnosticsOpen(v=>!v)}>{diagnosticsOpen?'Hide':'Show'}</button></div>{diagnosticsOpen&&<><button onClick={()=>void refreshDiagnostics()}>Refresh checks</button>{diagnostics.map(d=><div className="diagnostic-item" key={d.name}><strong>{d.name}</strong><span className={'ai-status '+(d.status==='ready'?'supported':d.status==='missing'?'unsupported':'unknown')}>{d.status}</span><p>{d.detail}</p></div>)}<small>CLI detection does not verify authentication. Sign in using the provider CLI before your first request.</small></>}</div><div className="ai-config-panel">
+    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><label>Workspace</label><button className="open-folder" disabled={busy} onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" disabled={busy} onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" disabled={busy} placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} disabled={busy} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">{provider==='codex'?'Codex read-only and workspace-write use CLI filesystem sandboxing. Full access bypasses sandbox and approvals.':'Claude read-only restricts allowed tool names, not an OS sandbox. Workspace write uses acceptEdits (other operations may still be allowed). Full access skips permissions.'}</p><label>Agent routing</label><div className="agents"><button disabled={busy} className={provider==='auto'?'active codex':''} onClick={()=>setProvider('auto')}>Auto</button><button disabled={busy} className={provider==='balanced'?'active codex':''} onClick={()=>setProvider('balanced')}>Balanced</button><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Auto uses local task rules and existing sessions to reduce handoffs; Balanced prioritizes session reuse. No extra AI routing call. Manual Claude/Codex remains available. Provider limits never justify replaying uncertain edits.</p><div className="ai-config-panel"><div className="usage-heading"><strong>Setup & Diagnostics</strong><button onClick={()=>setDiagnosticsOpen(v=>!v)}>{diagnosticsOpen?'Hide':'Show'}</button></div>{diagnosticsOpen&&<><button onClick={()=>void refreshDiagnostics()}>Refresh checks</button>{diagnostics.map(d=><div className="diagnostic-item" key={d.name}><strong>{d.name}</strong><span className={'ai-status '+(d.status==='ready'?'supported':d.status==='missing'?'unsupported':'unknown')}>{d.status}</span><p>{d.detail}</p></div>)}<small>CLI detection does not verify authentication. Sign in using the provider CLI before your first request.</small></>}</div><div className="ai-config-panel">
       <div className="usage-heading"><strong>Project AI configuration</strong><button onClick={()=>setAiConfigOpen(v=>!v)} aria-expanded={aiConfigOpen}>{aiConfigOpen?'Hide':'Show'}</button></div>
       {aiConfigOpen&&<>
         <button className="ai-config-refresh" disabled={!root.trim()||aiConfigLoading} onClick={()=>void scanAiConfig(root)}>{aiConfigLoading?'Scanning…':'Refresh scan'}</button>

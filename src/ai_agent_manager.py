@@ -18,6 +18,7 @@ from codex_profiles import choose_profile, profile_environment
 from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint, load_checkpoint
 from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
 from aam_tui import RichTurn, rich_available, provider_model
+from smart_router import route as smart_route
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -319,7 +320,7 @@ def show_agent_ready(tool, root, clear=False):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('tool', choices=['claude', 'codex'])
+    p.add_argument('tool', choices=['claude', 'codex', 'auto', 'balanced'])
     p.add_argument('--root', type=Path, default=Path.cwd())
     p.add_argument('--new', action='store_true')
     p.add_argument('--prompt')
@@ -336,10 +337,10 @@ def main():
         path = store_path(root)
     except ValueError as e:
         p.error(str(e))
-    if not shutil.which(ns.tool):
+    if ns.tool in ('claude', 'codex') and not shutil.which(ns.tool):
         p.error(f'{ns.tool} executable not found')
     state = {} if ns.new or not path.exists() else json.loads(path.read_text())
-    tool = ns.tool
+    tool = ns.tool if ns.tool in ('claude', 'codex') else 'codex'
     if ns.ui != 'textual':
         show_agent_ready(tool, root, clear=ns.prompt is None)
     if not sys.stdout.isatty():
@@ -349,6 +350,13 @@ def main():
 
     def execute(prompt, on_event=None, on_result=None, cancel_event=None):
         nonlocal tool
+        if ns.tool in ('auto', 'balanced'):
+            decision = smart_route(prompt, state, os.environ, mode=ns.tool)
+            tool = decision['provider']
+            if ns.desktop_jsonl:
+                emit_desktop('routing', **decision)
+            elif on_event is None:
+                print('[aam] Router: ' + json.dumps(decision), file=sys.stderr)
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
             tool = pending

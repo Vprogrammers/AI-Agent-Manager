@@ -110,7 +110,7 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
 
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
-    if provider != "claude" && provider != "codex" { return Err("Invalid provider".into()); }
+    if !["claude", "codex", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
     if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
     if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
     let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
