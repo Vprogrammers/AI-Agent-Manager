@@ -1,6 +1,7 @@
 """Full-screen Textual UI. Optional dependency: pip install textual."""
 import json
 import shutil
+import threading
 from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll, Horizontal, Vertical
@@ -34,6 +35,7 @@ class AgentApp(App):
         Binding('ctrl+t', 'switch', 'Agent', show=True),
         Binding('ctrl+q', 'quit', 'Quit', show=True),
         Binding('ctrl+h', 'history', 'History', show=False),
+        Binding('escape', 'cancel', 'Cancel', show=True),
     ]
     CSS = """
     Screen { background: #14171c; color: #dce2ea; }
@@ -77,6 +79,7 @@ class AgentApp(App):
         self.events = []
         self.current_tool = tool
         self.active_prompt = None
+        self.cancel_event = None
         self.session_usage = {'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0}
         self.live_usage = {}
         self.last_usage = {}
@@ -136,6 +139,7 @@ class AgentApp(App):
         self.active_prompt = Static('› ' + prompt, classes='user ' + self.tool)
         self.append(self.active_prompt)
         self.busy = True
+        self.cancel_event = threading.Event()
         self.current_tool = self.tool
         self.events = []
         self.live_usage = {}
@@ -148,7 +152,7 @@ class AgentApp(App):
         def event(obj):
             self.app.call_from_thread(self.record_event, obj)
         try:
-            result = self.execute_turn(prompt, event)
+            result = self.execute_turn(prompt, event, self.cancel_event)
             self.app.call_from_thread(self.complete, result, None)
         except Exception as error:
             self.app.call_from_thread(self.complete, None, str(error))
@@ -171,6 +175,7 @@ class AgentApp(App):
 
     def complete(self, result, error):
         self.busy = False
+        self.cancel_event = None
         if self.active_steps:
             self.active_steps.set_class(not self.show_steps, 'hidden')
         if error:
@@ -214,3 +219,9 @@ class AgentApp(App):
 
     def action_history(self):
         self.execute_command('/history')
+
+    def action_cancel(self):
+        if self.busy and self.cancel_event is not None:
+            self.cancel_event.set()
+            if self.active_steps:
+                self.active_steps.update('  Cancelling… inspect changes before retrying')

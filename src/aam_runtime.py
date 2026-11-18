@@ -15,7 +15,7 @@ MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_FILE_HASH_BYTES = 256 * 1024 * 1024
 MAX_FILES = 10000
 
-def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
+def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None, cancel_event=None):
     start = time.monotonic()
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
@@ -28,6 +28,17 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
             errors.append(line[-2048:].decode('utf-8', 'replace'))
     thread = threading.Thread(target=read_stderr, daemon=True)
     thread.start()
+    stop_watch = threading.Event()
+    def watch_cancel():
+        if cancel_event is None:
+            return
+        while not stop_watch.is_set():
+            if cancel_event.wait(0.1):
+                if not stop_watch.is_set() and proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGINT)
+                return
+    watcher = threading.Thread(target=watch_cancel, daemon=True)
+    watcher.start()
     try:
         while True:
             line = proc.stdout.readline(MAX_LINE_BYTES + 1)
@@ -62,6 +73,8 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
             ):
                 stdout.append(decoded)
         rc = proc.wait()
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError('Request cancelled; inspect repository changes before retrying')
     except KeyboardInterrupt:
         os.killpg(proc.pid, signal.SIGINT)
         try:
@@ -75,6 +88,7 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
                 proc.wait()
         raise InterruptedError('Request interrupted; inspect changes before retrying')
     finally:
+        stop_watch.set()
         thread.join(timeout=2)
         proc.stdout.close()
         proc.stderr.close()

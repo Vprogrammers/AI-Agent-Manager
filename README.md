@@ -367,3 +367,10 @@ not displayed. Test the app in a real terminal before relying on it for edits.
 - `/diff` (or Ctrl+D): staged and unstaged diff statistics.
 - Live model and usage are displayed only when the provider supplies structured metadata.
 - Live activity labels omit raw shell commands and private model reasoning.
+
+
+### Cancellation (experimental)
+
+Press **Esc** during an active request to send SIGINT to the active CLI process group.
+A cancelled request is not automatically replayed. Inspect changed files before retrying.
+Cancellation is best-effort and may depend on the provider CLI responding to SIGINT.

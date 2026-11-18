@@ -141,8 +141,8 @@ def record_usage(root, tool, model, seconds, usage, status, profile='default', t
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
-def stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
-    return bounded_stream_runner(cmd, cwd, tool, model, env, on_event=on_event)
+def stream_runner(cmd, cwd, tool, model, env=None, on_event=None, cancel_event=None):
+    return bounded_stream_runner(cmd, cwd, tool, model, env, on_event=on_event, cancel_event=cancel_event)
 
 def limit_summary(tool, stdout, stderr):
     """Return a short, safe provider-limit message without exposing raw JSON."""
@@ -218,7 +218,7 @@ def claude_retry_reason(stdout, before, after):
     return None
 
 
-def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
+def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, cancel_event=None):
     env = os.environ if env is None else env
     runner = stream_runner if runner is None else runner
     sessions = state.setdefault('sessions', {})
@@ -236,7 +236,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
         print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
     with profile_environment(profile, env) as runtime_env:
         if runner is stream_runner:
-            completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default', env=runtime_env, on_event=on_event)
+            completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default', env=runtime_env, on_event=on_event, cancel_event=cancel_event)
         else:
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
@@ -328,7 +328,7 @@ def main():
         show_agent_ready(tool, root, clear=ns.prompt is None)
     if not sys.stdout.isatty():
         print('[aam] Agent ready: ' + tool, file=sys.stderr)
-    def execute(prompt, on_event=None, on_result=None):
+    def execute(prompt, on_event=None, on_result=None, cancel_event=None):
         nonlocal tool
         pending = state.get('pending_switch')
         if pending and pending != tool and shutil.which(pending):
@@ -344,7 +344,7 @@ def main():
                         answer, model = run_turn(root, tool, prompt, state, on_event=view.event)
                 else:
                     view = None
-                    answer, model = run_turn(root, tool, prompt, state, on_event=on_event)
+                    answer, model = run_turn(root, tool, prompt, state, on_event=on_event, cancel_event=cancel_event)
             except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
                 message = str(e)
                 if on_event is None:
@@ -386,9 +386,9 @@ def main():
             from aam_textual import AgentApp
         except ImportError as error:
             p.error(f'Textual UI requires: python3 -m pip install textual ({error})')
-        def tui_execute(prompt, event):
+        def tui_execute(prompt, event, cancel_event=None):
             output = []
-            code = execute(prompt, on_event=event,
+            code = execute(prompt, on_event=event, cancel_event=cancel_event,
                            on_result=lambda agent, model, usage, answer:
                                output.append((agent, model, usage, answer)))
             return output[0] if code == 0 and output else None
