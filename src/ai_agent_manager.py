@@ -17,7 +17,7 @@ from collections import deque
 from codex_profiles import choose_profile, profile_environment
 from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint, load_checkpoint
 from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
-from aam_tui import RichTurn, rich_available
+from aam_tui import RichTurn, rich_available, provider_model
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -242,6 +242,22 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
     state['last_usage'] = usage
+    if tool == 'claude':
+        try:
+            reported_model = provider_model(json.loads(completed.stdout))
+            if reported_model:
+                model = reported_model
+        except (ValueError, TypeError):
+            pass
+    elif not model:
+        for line in completed.stdout.splitlines():
+            try:
+                reported_model = provider_model(json.loads(line))
+                if reported_model:
+                    model = reported_model
+                    break
+            except (ValueError, TypeError):
+                continue
     record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed', profile, env.get('AAM_TASK_ID'))
     if on_event is None:
         print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
@@ -391,7 +407,21 @@ def main():
                         f'{candidate} CLI is not installed'))
             elif command == '/diff':
                 diff = git(root, 'diff', '--stat') or 'No unstaged changes'
-                app.append(__import__('textual.widgets', fromlist=['Static']).Static(diff))
+                staged = git(root, 'diff', '--cached', '--stat') or 'No staged changes'
+                app.append(__import__('textual.widgets', fromlist=['Static']).Static(
+                    'Unstaged:\\n' + diff + '\\nStaged:\\n' + staged))
+            elif command == '/history':
+                from textual.widgets import Static
+                turns = state.get('history', [])[-12:]
+                if not turns:
+                    app.append(Static('No saved turns yet'))
+                for turn in turns:
+                    app.append(Static(f"{turn.get('tool', '?').upper()} · {turn.get('utc', '')}\\n"
+                                      f"› {turn.get('prompt', '')}\\n{turn.get('answer', '')}"))
+            elif command == '/tokens':
+                from textual.widgets import Static
+                app.append(Static('Last turn: ' + json.dumps(state.get('last_usage', {})) +
+                                  '\\nSession totals (completed turns): ' + json.dumps(app.session_usage)))
             elif command == '/status':
                 app.append(__import__('textual.widgets', fromlist=['Static']).Static(
                     json.dumps({'agent':tool,'sessions':list(state.get('sessions',{}))})))

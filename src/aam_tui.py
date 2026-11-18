@@ -49,6 +49,49 @@ def token_summary(usage):
                                    if isinstance(usage.get(key), int))
 
 
+def provider_model(event):
+    """Only report model IDs explicitly supplied by a provider."""
+    if not isinstance(event, dict):
+        return None
+    candidates = [event.get('model'), (event.get('message') or {}).get('model')
+                  if isinstance(event.get('message'), dict) else None]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def provider_usage(event):
+    """Extract a provider's reported counters without estimating usage."""
+    if not isinstance(event, dict):
+        return {}
+    usage = event.get('usage')
+    if not isinstance(usage, dict) and isinstance(event.get('message'), dict):
+        usage = event['message'].get('usage')
+    if not isinstance(usage, dict):
+        return {}
+    return {key: value for key, value in usage.items()
+            if key in ('input_tokens', 'cached_input_tokens', 'cache_read_input_tokens',
+                       'cache_creation_input_tokens', 'output_tokens')
+            and type(value) is int and value >= 0}
+
+
+def step_detail(event):
+    """Display safe, structured event metadata, never raw shell commands."""
+    label = event_label(event)
+    if not label:
+        return None
+    item = event.get('item') or {}
+    if not isinstance(item, dict):
+        return label
+    if item.get('type') == 'file_change':
+        changes = item.get('changes') or []
+        paths = [change.get('path') for change in changes if isinstance(change, dict)]
+        paths = [p for p in paths if isinstance(p, str)]
+        if paths:
+            return f'{label}: {", ".join(paths[:2])[:120]}'
+    return label
+
 class RichTurn:
     def __init__(self, tool, model):
         from rich.console import Console

@@ -7,7 +7,7 @@ from textual.containers import VerticalScroll, Horizontal, Vertical
 from textual.widgets import Header, Footer, Static, TextArea, Markdown, Button
 from textual.binding import Binding
 from textual import work
-from aam_tui import event_label, token_summary
+from aam_tui import event_label, token_summary, provider_model, provider_usage, step_detail
 
 COLORS = {'claude': '#D78B65', 'codex': '#35B9AD'}
 
@@ -33,6 +33,7 @@ class AgentApp(App):
         Binding('ctrl+d', 'diff', 'Diff', show=True),
         Binding('ctrl+t', 'switch', 'Agent', show=True),
         Binding('ctrl+q', 'quit', 'Quit', show=True),
+        Binding('ctrl+h', 'history', 'History', show=False),
     ]
     CSS = """
     Screen { background: #14171c; color: #dce2ea; }
@@ -76,6 +77,11 @@ class AgentApp(App):
         self.events = []
         self.current_tool = tool
         self.active_prompt = None
+        self.session_usage = {'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0}
+        self.live_usage = {}
+        self.last_usage = {}
+        self.last_answer = None
+        self.last_model = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -132,6 +138,7 @@ class AgentApp(App):
         self.busy = True
         self.current_tool = self.tool
         self.events = []
+        self.live_usage = {}
         self.active_steps = Static('  Working · waiting for provider events…', classes='steps')
         self.append(self.active_steps)
         self.run_request(prompt)
@@ -139,19 +146,28 @@ class AgentApp(App):
     @work(thread=True, exclusive=True)
     def run_request(self, prompt):
         def event(obj):
-            label = event_label(obj)
-            if label:
-                self.app.call_from_thread(self.record_step, label)
+            self.app.call_from_thread(self.record_event, obj)
         try:
             result = self.execute_turn(prompt, event)
             self.app.call_from_thread(self.complete, result, None)
         except Exception as error:
             self.app.call_from_thread(self.complete, None, str(error))
 
-    def record_step(self, label):
-        self.events.append(label)
+    def record_event(self, obj):
+        label = step_detail(obj)
+        if label:
+            self.events.append(label)
+        model = provider_model(obj)
+        if model:
+            self.model_name = model
+            self.last_model = model
+        usage = provider_usage(obj)
+        if usage:
+            self.live_usage.update(usage)
+        if label or model or usage:
+            self.refresh_status(self.live_usage)
         if self.active_steps:
-            self.active_steps.update('\n'.join('  · ' + step for step in self.events[-5:]))
+            self.active_steps.update('\\n'.join('  · ' + step for step in self.events[-5:]))
 
     def complete(self, result, error):
         self.busy = False
@@ -170,6 +186,10 @@ class AgentApp(App):
             self.active_prompt = None
         self.tool = tool
         self.model_name = model
+        self.last_usage = usage
+        for key in self.session_usage:
+            self.session_usage[key] += usage.get(key, 0) if isinstance(usage.get(key), int) else 0
+        self.last_answer = answer
         self.refresh_status(usage)
         color = COLORS[tool]
         panel = Vertical(classes='agent ' + tool)
@@ -191,3 +211,6 @@ class AgentApp(App):
 
     def action_diff(self):
         self.execute_command('/diff')
+
+    def action_history(self):
+        self.execute_command('/history')

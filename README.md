@@ -358,3 +358,12 @@ provider's reported model may be unavailable when using its default selection.
 Claude JSON output does not guarantee intermediate events; the app only displays
 those actually emitted. Tool arguments and hidden reasoning are intentionally
 not displayed. Test the app in a real terminal before relying on it for edits.
+
+
+### TUI inspection commands
+
+- `/history` (or Ctrl+H): view saved recent turns from the local bridge state.
+- `/tokens`: view last-turn reported usage and in-process completed-turn totals.
+- `/diff` (or Ctrl+D): staged and unstaged diff statistics.
+- Live model and usage are displayed only when the provider supplies structured metadata.
+- Live activity labels omit raw shell commands and private model reasoning.
