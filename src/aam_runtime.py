@@ -48,7 +48,7 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
             event = obj.get('type', '')
             if on_event is not None:
                 on_event(obj)
-            if event.startswith(('item.', 'turn.')):
+            if on_event is None and event.startswith(('item.', 'turn.')):
                 item = obj.get('item') or {}
                 print(f'[aam] {tool}/{model}: {event} {item.get("type", event)} '
                       f'({time.monotonic()-start:.1f}s)', file=sys.stderr, flush=True)

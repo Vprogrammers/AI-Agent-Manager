@@ -55,11 +55,11 @@ class RichTurn:
         from rich.text import Text
         body = Text()
         for step in self.steps[-7:]:
-            body.append('  • ' + step + '\\n', style='dim')
+            body.append('  • ' + step + '\n', style='dim')
         if not self.steps:
-            body.append('Waiting for provider events…\\n', style='dim')
-        body.append(f'\\nElapsed: {time.monotonic()-self.started:.0f}s', style='cyan')
-        body.append('\\n' + token_summary(self.usage), style='bright_cyan')
+            body.append('Waiting for provider events…\n', style='dim')
+        body.append(f'\nElapsed: {time.monotonic()-self.started:.0f}s', style='cyan')
+        body.append('\n' + token_summary(self.usage), style='bright_cyan')
         return Panel(body, title=f'[bold cyan]{self.tool.upper()}[/]  [bold]{self.model}[/]',
                      subtitle='Live activity · hidden after completion', border_style='cyan')
 
