@@ -75,8 +75,9 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None, cancel
         rc = proc.wait()
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError('Request cancelled; inspect repository changes before retrying')
-    except KeyboardInterrupt:
-        os.killpg(proc.pid, signal.SIGINT)
+    except (KeyboardInterrupt, SystemExit):
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGINT)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -89,6 +90,14 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None, cancel
         raise InterruptedError('Request interrupted; inspect changes before retrying')
     finally:
         stop_watch.set()
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=3)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
         thread.join(timeout=2)
         proc.stdout.close()
         proc.stderr.close()
