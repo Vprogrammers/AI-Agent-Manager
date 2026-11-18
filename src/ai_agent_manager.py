@@ -17,6 +17,7 @@ from collections import deque
 from codex_profiles import choose_profile, profile_environment
 from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint, load_checkpoint
 from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
+from aam_tui import RichTurn, rich_available
 
 HIGH = re.compile(r'architecture|architect|security|auth|migration|concurrency|deadlock|payment|pricing|kmp|multiplatform|arhitektur|bezbednost|sigurnost|migracij|konkurent|cena|cijena', re.I)
 LOW = re.compile(r'docs?|readme|typo|comment|format|rename|documentation|dokument|komentar', re.I)
@@ -140,8 +141,8 @@ def record_usage(root, tool, model, seconds, usage, status, profile='default', t
         f.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
-def stream_runner(cmd, cwd, tool, model, env=None):
-    return bounded_stream_runner(cmd, cwd, tool, model, env)
+def stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
+    return bounded_stream_runner(cmd, cwd, tool, model, env, on_event=on_event)
 
 def limit_summary(tool, stdout, stderr):
     """Return a short, safe provider-limit message without exposing raw JSON."""
@@ -217,7 +218,7 @@ def claude_retry_reason(stdout, before, after):
     return None
 
 
-def run_turn(root, tool, prompt, state, env=None, runner=None):
+def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None):
     env = os.environ if env is None else env
     runner = stream_runner if runner is None else runner
     sessions = state.setdefault('sessions', {})
@@ -235,11 +236,12 @@ def run_turn(root, tool, prompt, state, env=None, runner=None):
         print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
     with profile_environment(profile, env) as runtime_env:
         if runner is stream_runner:
-            completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default', env=runtime_env)
+            completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default', env=runtime_env, on_event=on_event)
         else:
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
+    state['last_usage'] = usage
     record_usage(root, tool, model or 'CLI default', elapsed, usage, 'ok' if completed.returncode == 0 else 'failed', profile, env.get('AAM_TASK_ID'))
     print(f'[aam] {tool}/{model or "default"} | {elapsed:.1f}s | tokens: {usage or "unavailable"}', file=sys.stderr)
     if completed.returncode:
@@ -289,8 +291,12 @@ def main():
     p.add_argument('--root', type=Path, default=Path.cwd())
     p.add_argument('--new', action='store_true')
     p.add_argument('--prompt')
+    p.add_argument('--ui', choices=['classic', 'rich'], default='classic',
+                   help='rich: transient live activity and highlighted final answer (requires rich)')
     ns = p.parse_args()
     root = ns.root.resolve()
+    if ns.ui == 'rich' and not rich_available():
+        p.error('Rich UI requires: python3 -m pip install rich')
     try:
         path = store_path(root)
     except ValueError as e:
@@ -311,7 +317,13 @@ def main():
             show_agent_ready(tool, root)
         for attempt in range(2):
             try:
-                answer, model = run_turn(root, tool, prompt, state)
+                if ns.ui == 'rich' and sys.stdout.isatty() and ns.prompt is None:
+                    view = RichTurn(tool, model_for(tool, prompt, os.environ))
+                    with view:
+                        answer, model = run_turn(root, tool, prompt, state, on_event=view.event)
+                else:
+                    view = None
+                    answer, model = run_turn(root, tool, prompt, state)
             except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
                 message = str(e)
                 print(f'[aam] {message}', file=sys.stderr)
@@ -332,8 +344,11 @@ def main():
                 return 1
             state.pop('pending_switch', None)
             save(path, state)
-            print(f'[aam] {tool} | {model}', file=sys.stderr)
-            print(answer)
+            if view is not None:
+                view.finish(tool, model, state.get('last_usage', {}), answer)
+            else:
+                print(f'[aam] {tool} | {model}', file=sys.stderr)
+                print(answer)
             return 0
         return 1
     if ns.prompt is not None:

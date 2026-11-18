@@ -312,3 +312,27 @@ Public CI checks Python syntax and unit tests. It does **not** run authenticated
 ## License
 
 MIT.
+
+
+## Optional modern terminal UI (MVP)
+
+Install the optional renderer:
+
+```bash
+python3 -m pip install rich
+aam codex --root . --ui rich
+# or
+aam claude --root . --ui rich
+```
+
+The existing `aam` commands, profiles, state and safe failover remain unchanged.
+While Codex runs, the Rich UI highlights the active provider and model, shows recent
+tool-event types, elapsed time and provider-reported token usage. On completion, the
+temporary activity panel disappears and the final answer is rendered as Markdown,
+with a token summary. Claude's JSON mode reports limited intermediate activity;
+its usage appears when the turn finishes. One-shot and redirected sessions retain
+plain output. The default `--ui classic` remains dependency-free.
+
+This is the first presentation-layer MVP, not yet a full-screen Textual application.
+It never exposes hidden reasoning or tool arguments, and cannot display token counts
+that a provider has not supplied.

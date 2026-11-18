@@ -15,7 +15,7 @@ MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_FILE_HASH_BYTES = 256 * 1024 * 1024
 MAX_FILES = 10000
 
-def bounded_stream_runner(cmd, cwd, tool, model, env=None):
+def bounded_stream_runner(cmd, cwd, tool, model, env=None, on_event=None):
     start = time.monotonic()
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
@@ -46,6 +46,8 @@ def bounded_stream_runner(cmd, cwd, tool, model, env=None):
             except ValueError:
                 continue
             event = obj.get('type', '')
+            if on_event is not None:
+                on_event(obj)
             if event.startswith(('item.', 'turn.')):
                 item = obj.get('item') or {}
                 print(f'[aam] {tool}/{model}: {event} {item.get("type", event)} '
