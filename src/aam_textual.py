@@ -11,10 +11,24 @@ from aam_tui import event_label, token_summary
 
 COLORS = {'claude': '#D78B65', 'codex': '#35B9AD'}
 
+class PromptEditor(TextArea):
+    """Enter submits; Ctrl+N inserts a newline (works in standard terminals)."""
+    BINDINGS = [
+        Binding('enter', 'submit_prompt', 'Send', priority=True, show=False),
+        Binding('ctrl+n', 'insert_newline', 'New line', priority=True, show=False),
+    ]
+
+    def action_submit_prompt(self):
+        self.app.action_send()
+
+    def action_insert_newline(self):
+        self.insert('\\n')
+
+
 class AgentApp(App):
     TITLE = 'AI Agent Manager'
     BINDINGS = [
-        Binding('ctrl+enter', 'send', 'Send', show=True),
+        Binding('enter', 'send', 'Send', show=True),
         Binding('ctrl+o', 'toggle_steps', 'Steps', show=True),
         Binding('ctrl+d', 'diff', 'Diff', show=True),
         Binding('ctrl+t', 'switch', 'Agent', show=True),
@@ -65,10 +79,10 @@ class AgentApp(App):
         yield Static('', id='status')
         yield VerticalScroll(id='history')
         with Vertical(id='composer-shell'):
-            yield TextArea(id='composer', language=None, soft_wrap=True)
-            yield Static('Enter text · Ctrl+Enter to send', id='composer-info')
+            yield PromptEditor(id='composer', language=None, soft_wrap=True)
+            yield Static('Enter send · Ctrl+N new line', id='composer-info')
         with Horizontal(id='actions'):
-            yield Static('Ctrl+Enter Send   Ctrl+T Agent   Ctrl+O Steps   Ctrl+D Diff', id='hint')
+            yield Static('Enter Send   Ctrl+N New line   Ctrl+T Agent   Ctrl+O Steps   Ctrl+D Diff', id='hint')
         yield Footer()
 
     def on_mount(self):
@@ -85,7 +99,7 @@ class AgentApp(App):
             f'[{color}][b]{self.tool.upper()}[/b][/]  ·  {self.model_name or "CLI default"}'
             f'   ·   {self.root.name}   ·   {token_summary(usage or {})}')
         self.query_one('#composer-info', Static).update(
-            f'{self.tool.upper()} · {self.model_name or "CLI default"}  |  Ctrl+Enter send')
+            f'{self.tool.upper()} · {self.model_name or "CLI default"}  |  Enter send · Ctrl+N new line')
 
     def append(self, widget):
         history = self.query_one('#history', VerticalScroll)
