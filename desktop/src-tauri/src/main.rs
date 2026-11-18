@@ -101,6 +101,71 @@ fn desktop_diagnostics(root: String) -> Vec<Diagnostic> {
     result
 }
 
+// Installation is initiated only by an explicit user click. No shell interpolation,
+// elevated privileges, or credentials are handled by the application.
+#[tauri::command]
+async fn install_provider_cli(provider: String) -> Result<String, String> {
+    let package = match provider.as_str() {
+        "claude" => "@anthropic-ai/claude-code",
+        "codex" => "@openai/codex",
+        _ => return Err("Unsupported provider".into()),
+    };
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let mut child = tokio::process::Command::new(npm);
+    child.args(["install", "--global", package, "--no-audit", "--no-fund"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(180), child.output())
+        .await.map_err(|_| "Installation timed out (3 minutes)".to_string())?
+        .map_err(|_| "Node.js/npm is not available. Install Node.js LTS first.".to_string())?;
+    if !output.status.success() {
+        // Never return npm stderr: it may contain registry tokens or private paths.
+        return Err("CLI installation failed. Check npm permissions and registry connectivity.".into());
+    }
+    Ok(format!("{provider} CLI installation completed. Recheck status; restart the app if PATH changed."))
+}
+
+#[tauri::command]
+fn open_provider_login(provider: String) -> Result<String, String> {
+    let (binary, args): (&str, &[&str]) = match provider.as_str() {
+        "claude" => ("claude", &["auth", "login"]),
+        "codex" => ("codex", &["login"]),
+        _ => return Err("Unsupported provider".into()),
+    };
+    // Login must be interactive: open the OS terminal, never capture its credentials.
+    #[cfg(target_os = "macos")]
+    {
+        let command = format!("{binary} {}", args.join(" "));
+        let script = format!("tell application \"Terminal\" to activate\ntell application \"Terminal\" to do script \"{command}\"");
+        let status = Command::new("osascript").args(["-e", &script]).status().map_err(|_| "Cannot open Terminal".to_string())?;
+        if !status.success() { return Err("Terminal did not start".into()); }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("cmd").args(["/C", "start", "cmd", "/K", &format!("{binary} {}", args.join(" "))])
+            .status().map_err(|_| "Cannot open Command Prompt".to_string())?;
+        if !status.success() { return Err("Command Prompt did not start".into()); }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let command = format!("{binary} {}", args.join(" "));
+        let terminals: [(&str, Vec<&str>); 3] = [
+            ("x-terminal-emulator", vec!["-e", "sh", "-c", "exec \"$SHELL\" -ic '"]),
+            ("gnome-terminal", vec!["--", "sh", "-c", ""]),
+            ("konsole", vec!["-e", "sh", "-c", ""]),
+        ];
+        let _ = terminals; // platform terminal support below uses fixed executable/args.
+        let launch = Command::new("x-terminal-emulator").args(["-e", "sh", "-c", &format!("{command}; exec sh")]).spawn()
+            .or_else(|_| Command::new("gnome-terminal").args(["--", "sh", "-c", &format!("{command}; exec sh")]).spawn())
+            .or_else(|_| Command::new("konsole").args(["-e", "sh", "-c", &format!("{command}; exec sh")]).spawn())
+            .map_err(|_| "No supported terminal found. Install a terminal emulator.".to_string())?;
+        drop(launch);
+    }
+    Ok("Login opened in your system terminal. Complete it there, then recheck.".into())
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderSetup {
@@ -302,6 +367,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, install_provider_cli, open_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
