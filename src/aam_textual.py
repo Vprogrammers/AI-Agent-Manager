@@ -25,9 +25,15 @@ class AgentApp(App):
     #status { height: 3; padding: 1 2; background: #202833; }
     #history { height: 1fr; padding: 1 2; }
     .user { margin: 1 0; padding: 1 2; background: #242d39; }
-    .agent { margin: 1 0; padding: 1 2; border: round #35b9ad; }
-    .claude { border: round #d78b65; }
-    .codex { border: round #35b9ad; }
+    .agent { margin: 1 0; padding: 1 2; background: #1b222b; height: auto; }
+    .agent.claude { border: round #d78b65; }
+    .agent.codex { border: round #35b9ad; }
+    #status.claude { border-left: thick #d78b65; background: #30231f; }
+    #status.codex { border-left: thick #35b9ad; background: #172d2c; }
+    #composer.claude { border: round #d78b65; }
+    #composer.codex { border: round #35b9ad; }
+    #send.claude { background: #a95d3d; }
+    #send.codex { background: #168d83; }
     .steps { color: #8e9aab; padding: 0 1; }
     .hidden { display: none; }
     #composer { height: 6; margin: 0 2; border: round #65738a; }
@@ -65,6 +71,10 @@ class AgentApp(App):
 
     def refresh_status(self, usage=None):
         color = COLORS[self.tool]
+        for selector in ('#status', '#composer', '#send'):
+            widget = self.query_one(selector)
+            widget.remove_class('claude', 'codex')
+            widget.add_class(self.tool)
         self.query_one('#status', Static).update(
             f'[{color}][b]{self.tool.upper()}[/b][/]  ·  {self.model_name or "CLI default"}'
             f'   |   {self.root.name}   |   {token_summary(usage or {})}')
@@ -90,7 +100,7 @@ class AgentApp(App):
             self.exit()
             return
         if prompt.startswith('/'):
-            self.command(prompt)
+            self.execute_command(prompt)
             return
         self.append(Static(prompt, classes='user'))
         self.busy = True
@@ -115,17 +125,17 @@ class AgentApp(App):
     def record_step(self, label):
         self.events.append(label)
         if self.active_steps:
-            self.active_steps.update('\\n'.join('• ' + s for s in self.events[-12:]))
+            self.active_steps.update('\n'.join('• ' + s for s in self.events[-12:]))
 
     def complete(self, result, error):
         self.busy = False
         if self.active_steps:
             self.active_steps.set_class(not self.show_steps, 'hidden')
         if error:
-            self.append(Static('Request failed: ' + error, classes='agent'))
+            self.append(Static('Request failed: ' + error, classes='agent ' + self.current_tool))
             return
         if result is None:
-            self.append(Static('Request failed. Check provider logs.', classes='agent'))
+            self.append(Static('Request failed. Check provider logs.', classes='agent ' + self.current_tool))
             return
         tool, model, usage, answer = result
         self.tool = tool
@@ -148,7 +158,7 @@ class AgentApp(App):
         if self.busy:
             return
         target = 'claude' if self.tool == 'codex' else 'codex'
-        self.command('/' + target)
+        self.execute_command('/' + target)
 
     def action_diff(self):
-        self.command('/diff')
+        self.execute_command('/diff')
