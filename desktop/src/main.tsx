@@ -27,6 +27,49 @@ function tokenRows(value: string): Array<[string,string]> {
     return [TOKEN_LABELS[key] || key.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()), number.toLocaleString('en-US')] as [string,string];
   }).filter((row): row is [string,string] => row !== null);
 }
+
+type TokenUsage = Record<string, number>;
+type UsageRecord = { provider: Provider; model: string; duration: number; usage: TokenUsage; time: string };
+const USAGE_PREFIX = 'aam.desktop.usage.v1:';
+function loadUsage(path: string): UsageRecord[] {
+  if (!path) return [];
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(USAGE_PREFIX + path) || '[]');
+    return Array.isArray(value) ? value.filter((v): v is UsageRecord =>
+      !!v && (v.provider === 'claude' || v.provider === 'codex') &&
+      typeof v.duration === 'number' && !!v.usage && typeof v.usage === 'object'
+    ).slice(-500) : [];
+  } catch { return []; }
+}
+function numericUsage(value: unknown): TokenUsage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([,v]) =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0
+  )) as TokenUsage;
+}
+const numberFormat = (value: number) => value.toLocaleString('en-US');
+function totals(records: UsageRecord[]): TokenUsage {
+  const result: TokenUsage = {};
+  for (const record of records) for (const [key,value] of Object.entries(record.usage)) result[key] = (result[key] || 0) + value;
+  return result;
+}
+function usageRows(usage: TokenUsage): Array<[string, number]> {
+  const order = ['input_tokens','cached_input_tokens','cache_read_input_tokens','cache_creation_input_tokens','output_tokens','reasoning_output_tokens'];
+  return Object.entries(usage).sort(([a],[b]) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  }).map(([key,value]) => [TOKEN_LABELS[key] || key.replace(/_/g,' ').replace(/^./,c=>c.toUpperCase()), value]);
+}
+function cacheRatio(usage: TokenUsage): string | null {
+  const input = usage.input_tokens;
+  const cached = usage.cached_input_tokens ?? usage.cache_read_input_tokens;
+  return input > 0 && cached !== undefined && cached <= input ? (100*cached/input).toFixed(1)+'%' : null;
+}
+function TokenTable({usage}: {usage:TokenUsage}) {
+  const rows = usageRows(usage);
+  return rows.length ? <div className="token-stats">{rows.map(([label,value],i)=><div className="token-row" key={i}><span>{label}</span><span className="token-value">{numberFormat(value)}</span></div>)}{cacheRatio(usage)&&<div className="token-row"><span>Cached share</span><span className="token-value">{cacheRatio(usage)}</span></div>}</div> : <p className="token-empty">Not reported</p>;
+}
+
 const WORKSPACES_KEY = 'aam.desktop.workspaces.v1';
 function savedWorkspaces(): string[] {
   try { const value: unknown = JSON.parse(localStorage.getItem(WORKSPACES_KEY) || '[]'); return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string').slice(0, 8) : []; }
@@ -47,6 +90,9 @@ function App() {
   const [pendingSwitch, setPendingSwitch] = React.useState(false);
   const [failedPrompt, setFailedPrompt] = React.useState('');
   const [usage, setUsage] = React.useState<string>('Not reported');
+  const [lastUsage, setLastUsage] = React.useState<TokenUsage>({});
+  const [usageHistory, setUsageHistory] = React.useState<UsageRecord[]>([]);
+  const [usageExpanded, setUsageExpanded] = React.useState(true);
   const [lastProvider, setLastProvider] = React.useState<string>('None');
   const [limitNotice, setLimitNotice] = React.useState('');
   const [activity, setActivity] = React.useState('');
@@ -61,7 +107,7 @@ function App() {
   const [loadingRepos, setLoadingRepos] = React.useState(false);
   const [cloning, setCloning] = React.useState(false);
   const selectWorkspace = (path: string) => {
-    setRoot(path); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
+    setRoot(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
     const next = [path, ...recent.filter(p => p !== path)].slice(0, 8);
     setRecent(next); localStorage.setItem(WORKSPACES_KEY, JSON.stringify(next));
   };
@@ -110,10 +156,11 @@ function App() {
     const id = String(++requestSeq.current);
     const requestedProvider = provider;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
-    setPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider');
+    setPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
     setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider);
     setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
     setMessages(m => [...m, { role: 'user', text, provider: requestedProvider }]);
+    const requestStarted = Date.now();
     let completed = false;
     let streamText = '';
     let codexSnapshot = '';
@@ -158,14 +205,17 @@ function App() {
               setLiveText(streamText);
             }
             const usage = (ev.usage || (ev.message as Record<string,unknown> | undefined)?.usage) as Record<string,unknown> | undefined;
-            if (usage) setUsage(Object.entries(usage).filter(([,v])=>typeof v==='number').map(([k,v])=>k+': '+v).join(' · ') || 'Not reported');
+            if (usage) { const parsed = numericUsage(usage); setLastUsage(parsed); setUsage(Object.keys(parsed).length ? 'Live usage' : 'Not reported'); }
           }
         } else if (kind === 'result') {
           completed = true;
           const actual = data.provider === 'codex' ? 'codex' : 'claude';
           setLastProvider(actual); setProvider(actual);
           const counts = data.usage as Record<string,unknown> | undefined;
-          setUsage(counts && Object.keys(counts).length ? Object.entries(counts).map(([k,v])=>k+': '+v).join(' · ') : 'Not reported');
+          const parsed = numericUsage(counts);
+          setLastUsage(parsed); setUsage(Object.keys(parsed).length ? 'Reported' : 'Not reported');
+          const record: UsageRecord = {provider:actual,model:String(data.model || 'Unknown'),duration:Math.round((Date.now()-requestStarted)/1000),usage:parsed,time:new Date().toISOString()};
+          setUsageHistory(previous => { const next=[...previous,record].slice(-500); try { localStorage.setItem(USAGE_PREFIX+root,JSON.stringify(next)); } catch {} return next; });
           setMessages(m => [...m, {role:'assistant', text:String(data.answer || streamText), provider:actual}]);
           setLiveText('');
           setActivity('Completed · '+String(data.model || actual));
@@ -190,7 +240,27 @@ function App() {
     finally { unlisten?.(); setBusy(false); setStartedAt(null); }
   };
   return <div className="app">
-    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><label>Workspace</label><button className="open-folder" onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">Workspace write allows project edits. Full access requires confirmation before each request.</p><label>Agent</label><div className="agents"><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Provider limits may require a manual continuation when prior work cannot be ruled out.</p><div className="usage-panel"><strong>Last request</strong><span>Provider: {lastProvider}</span><div className="token-stats"><strong>Tokens</strong>{tokenRows(usage).length ? tokenRows(usage).map(([label,value],index)=><div className="token-row" key={index}><span>{label}</span><span className="token-value">{value}</span></div>) : <span className="token-empty">{usage}</span>}</div><small>Only provider-reported usage is shown. Zero can mean missing counters.</small></div></aside>
+    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><label>Workspace</label><button className="open-folder" onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">Workspace write allows project edits. Full access requires confirmation before each request.</p><label>Agent</label><div className="agents"><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Provider limits may require a manual continuation when prior work cannot be ruled out.</p><div className="usage-panel">
+      <div className="usage-heading"><strong>Usage statistics</strong><button onClick={()=>setUsageExpanded(v=>!v)} aria-expanded={usageExpanded}>{usageExpanded?'Hide':'Show'}</button></div>
+      {usageExpanded&&<>
+        <strong>Last request</strong>
+        <span>Provider: {lastProvider}</span>
+        <span>Status: {busy ? 'Running' : usage}</span>
+        {usageHistory.length>0&&<><span>Model: {usageHistory[usageHistory.length-1].model}</span><span>Duration: {usageHistory[usageHistory.length-1].duration}s</span></>}
+        <TokenTable usage={lastUsage}/>
+        <strong>Desktop history · this workspace</strong>
+        <span>Completed requests: {usageHistory.length}</span>
+        <span>Recorded duration: {numberFormat(usageHistory.reduce((sum,r)=>sum+r.duration,0))}s</span>
+        <TokenTable usage={totals(usageHistory)}/>
+        <strong>By provider</strong>
+        {(['claude','codex'] as const).map(agent => {
+          const records = usageHistory.filter(r=>r.provider===agent);
+          return <div className="provider-usage" key={agent}><span>{agent.toUpperCase()} · {records.length} requests</span><TokenTable usage={totals(records)}/></div>;
+        })}
+        <small>Totals are from up to 500 completed requests recorded by this desktop app for this workspace. Older CLI usage and other devices are excluded. Provider counters may be cumulative or incomplete; these totals are not billing figures or context-window usage.</small>
+        <button className="clear-usage" disabled={busy||usageHistory.length===0} onClick={()=>{if(window.confirm('Clear desktop usage history for this workspace?')){localStorage.removeItem(USAGE_PREFIX+root);setUsageHistory([]);}}}>Clear desktop history</button>
+      </>}
+    </div></aside>
     <main>{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={m.role}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small><pre>{m.text}</pre></article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><pre>{liveText}<span className="stream-cursor">▍</span></pre></article>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}><textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void send();}}} placeholder="Ask Claude or Codex…"/><button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()} onClick={()=>void send()}>{busy?'Running…':'Send →'}</button></footer></main>
   </div>;
 }

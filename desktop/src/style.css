@@ -40,3 +40,5 @@ aside select{width:100%;padding:11px 12px;border:1px solid #455260;border-radius
 .workspace-panel input:focus,.workspace-panel select:focus{border-color:var(--workspace-accent);outline:2px solid var(--workspace-accent);outline-offset:1px;box-shadow:0 0 0 4px var(--workspace-glow)}
 .workspace-panel .recent button.selected{background:var(--workspace-glow)}
 .workspace-panel .open-folder:hover{background:var(--workspace-glow)}
+
+.usage-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.usage-heading button,.clear-usage{font-size:11px;padding:5px 9px}.usage-panel>strong:not(:first-child){margin-top:8px}.provider-usage{display:flex;flex-direction:column;gap:5px;padding:8px 0;border-top:1px solid #35404c}.provider-usage>span{font-size:11px;font-weight:700;color:#dce5eb}.usage-panel .token-stats{gap:6px}.usage-panel .token-row{font-size:11px}.usage-panel small{font-size:10px}.clear-usage{align-self:flex-start}
