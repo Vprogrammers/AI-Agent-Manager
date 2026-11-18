@@ -37,6 +37,7 @@ export default function AgentSetupWizard() {
   const [working, setWorking] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState('');
   const [authPending, setAuthPending] = React.useState(false);
+  const [authProvider, setAuthProvider] = React.useState<'claude' | 'codex' | null>(null);
   const [terminalOutput, setTerminalOutput] = React.useState('');
   const [terminalInput, setTerminalInput] = React.useState('');
   const [terminalOpen, setTerminalOpen] = React.useState(false);
@@ -97,7 +98,9 @@ export default function AgentSetupWizard() {
           const login = await invoke<string>('open_provider_login', { provider: id });
           setNotice(message + ' ' + login);
           setTerminalOutput(''); setTerminalOpen(true);
-          setAuthPending(true);
+          setAuthProvider(id);
+          setAuthProvider(id);
+        setAuthPending(true);
         } catch (loginError) {
           setNotice(message + ' Login could not be started automatically; use Open login to retry.');
           setTerminalOpen(false);
@@ -126,15 +129,16 @@ export default function AgentSetupWizard() {
         const items = await invoke<ProviderStatus[]>('provider_setup_status');
         if (!active) return;
         setStatuses(items);
-        if (items.some(item => item.authenticated)) {
+        if (items.some(item => item.id === authProvider && item.authenticated)) {
           setAuthPending(false);
           setNotice('Authentication verified. Agent is ready.');
+          void invoke('focus_after_login').catch(() => { /* OS may deny foreground activation. */ });
           window.clearInterval(timer);
         }
       } catch { /* A manual recheck remains available. */ }
     }, 3000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [authPending]);
+  }, [authPending, authProvider]);
 
   return <>
     <button type="button" className="setup-launch" onClick={() => { setOpen(true); void refresh(); }}>
