@@ -32,3 +32,11 @@ footer.composer.claude textarea:focus{border-color:#d78b65;outline:2px solid rgb
 footer.composer.codex textarea:focus{border-color:#35b9ad;outline:2px solid rgba(53,185,173,.65);outline-offset:1px;box-shadow:0 0 0 4px rgba(53,185,173,.12)}
 
 aside select{width:100%;padding:11px 12px;border:1px solid #455260;border-radius:8px;background:#252e39;color:#e8edf2;font:inherit;cursor:pointer}aside select:focus-visible{outline:2px solid #35b9ad;outline-offset:2px}
+
+/* Workspace controls follow the currently selected or running agent. */
+.workspace-panel.claude{--workspace-accent:#d78b65;--workspace-glow:rgba(215,139,101,.2)}
+.workspace-panel.codex{--workspace-accent:#35b9ad;--workspace-glow:rgba(53,185,173,.2)}
+.workspace-panel .open-folder,.workspace-panel .recent button.selected{border-color:var(--workspace-accent);color:var(--workspace-accent)}
+.workspace-panel input:focus,.workspace-panel select:focus{border-color:var(--workspace-accent);outline:2px solid var(--workspace-accent);outline-offset:1px;box-shadow:0 0 0 4px var(--workspace-glow)}
+.workspace-panel .recent button.selected{background:var(--workspace-glow)}
+.workspace-panel .open-folder:hover{background:var(--workspace-glow)}
