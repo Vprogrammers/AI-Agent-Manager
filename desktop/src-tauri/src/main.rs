@@ -192,10 +192,30 @@ async fn install_provider_cli(provider: String) -> Result<String, String> {
     Ok(format!("{provider} CLI installation completed. Recheck status; restart the app if PATH changed."))
 }
 
-// Provider CLI owns browser OAuth and credential storage. The desktop app only
-// starts the login process; it never receives passwords, tokens or auth output.
+// Interactive provider login runs in a real PTY embedded in the setup UI.
+// OAuth browser redirects are left to the provider CLI and system browser:
+// third-party identity providers may prohibit embedded webviews.
+type LoginWriter = Box<dyn std::io::Write + Send>;
+#[derive(Default)]
+struct LoginSession(Mutex<Option<LoginWriter>>);
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LoginOutput { text: String, finished: bool }
+
 #[tauri::command]
-async fn open_provider_login(provider: String) -> Result<String, String> {
+fn login_pty_write(input: String, state: tauri::State<'_, LoginSession>) -> Result<(), String> {
+    if input.len() > 4096 { return Err("Input too long".into()); }
+    let mut session = state.0.lock().map_err(|_| "Login session unavailable")?;
+    let writer = session.as_mut().ok_or("No active login session")?;
+    use std::io::Write;
+    writer.write_all(input.as_bytes()).map_err(|_| "Unable to send login input".to_string())?;
+    writer.flush().map_err(|_| "Unable to flush login input".to_string())
+}
+
+#[tauri::command]
+fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::State<'_, LoginSession>) -> Result<String, String> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
         "claude" => ("claude", &["auth", "login"]),
         "codex" => ("codex", &["login"]),
@@ -205,29 +225,46 @@ async fn open_provider_login(provider: String) -> Result<String, String> {
         std::env::split_paths(&paths).flat_map(|p| {
             let mut candidates = vec![p.join(binary)];
             if cfg!(windows) {
-                for ext in ["exe", "cmd", "bat"] {
-                    candidates.push(p.join(format!("{binary}.{ext}")));
-                }
+                for ext in ["exe", "cmd", "bat"] { candidates.push(p.join(format!("{binary}.{ext}"))); }
             }
             candidates
         }).find(|p| p.is_file())
     }).ok_or("Provider CLI not found. Recheck installation first.")?;
-    let mut command = tokio::process::Command::new(executable);
-    command.args(args).stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null()).kill_on_drop(true);
-    let mut child = command.spawn().map_err(|_| "Could not start provider login".to_string())?;
-    // Give the CLI time to reject unsupported headless login. Browser-based OAuth
-    // is launched by the provider CLI; no external terminal is opened.
-    match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
-        Ok(Ok(status)) if !status.success() => Err("Provider CLI requires an interactive login session. In-app OAuth is not supported by this CLI version.".into()),
-        Ok(Err(_)) => Err("Provider login process failed".into()),
-        Ok(Ok(_)) => Ok("Provider login completed. Recheck authentication.".into()),
-        Err(_) => {
-            tokio::spawn(async move { let _ = tokio::time::timeout(std::time::Duration::from_secs(300), child.wait()).await; });
-            Ok("Provider login started. Complete authentication in your browser, then recheck.".into())
-        }
+    let pty = native_pty_system().openpty(PtySize {
+        rows: 24, cols: 100, pixel_width: 0, pixel_height: 0
+    }).map_err(|_| "Could not create interactive login terminal".to_string())?;
+    let mut cmd = CommandBuilder::new(executable);
+    for arg in args { cmd.arg(arg); }
+    let mut child = pty.slave.spawn_command(cmd).map_err(|_| "Could not launch provider login".to_string())?;
+    drop(pty.slave);
+    let writer = pty.master.take_writer().map_err(|_| "Could not open login input".to_string())?;
+    let mut reader = pty.master.try_clone_reader().map_err(|_| "Could not open login output".to_string())?;
+    {
+        let mut guard = state.0.lock().map_err(|_| "Login session unavailable")?;
+        if guard.is_some() { let _ = child.kill(); return Err("A login is already in progress".into()); }
+        *guard = Some(writer);
     }
+    let state_handle = app.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    // Do not persist PTY output; avoid exposing credentials in logs.
+                    let _ = app.emit("provider-login-output", LoginOutput {
+                        text: String::from_utf8_lossy(&buf[..n]).into_owned(), finished: false
+                    });
+                }
+            }
+        }
+        let _ = child.wait();
+        if let Some(session) = state_handle.try_state::<LoginSession>() {
+            if let Ok(mut guard) = session.0.lock() { *guard = None; }
+        }
+        let _ = app.emit("provider-login-output", LoginOutput { text: String::new(), finished: true });
+    });
+    Ok("Interactive login started inside the application. Complete provider browser authorization if prompted.".into())
 }
 
 #[derive(Serialize)]
@@ -431,6 +468,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
