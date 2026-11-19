@@ -890,7 +890,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let executable = aam_executable().map_err(|e| format!("PRESTART: {e}"))?;
     let root_arg = root.to_str().ok_or("Invalid workspace path")?;
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
-    let mut child = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
+    let mut child = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
     // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
     if permission != "full-access" { child.env("AAM_OUTER_SANDBOX", "1"); } else { child.env_remove("AAM_OUTER_SANDBOX"); }
