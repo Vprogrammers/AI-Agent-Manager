@@ -750,6 +750,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let mut lines = BufReader::new(stdout).lines();
     let mut reported_limit = false;
     let mut reported_error = false;
+    let mut observed_execution = false;
     let result = await_runtime(async {
         while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
@@ -760,6 +761,16 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
                         reported_limit = true;
                     }
                 }
+                // Unknown events are treated as possible execution.
+                let kind = event.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let activity_type = event.get("event").and_then(|v| v.get("type"))
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                let pre_execution = match kind {
+                    "provider" | "routing" | "error" => true,
+                    "activity" => matches!(activity_type, "thread.started" | "turn.started"),
+                    _ => false,
+                };
+                if !pre_execution { observed_execution = true; }
                 let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
             }
         }
@@ -777,7 +788,11 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     }
     if reported_error || result.as_ref().is_ok_and(|status| !status.success()) {
         let message = if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
-            format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
+            if reported_limit && !observed_execution && result.as_ref().is_ok_and(|status| !status.success()) {
+                format!("PREEXEC: {provider} rate limit before task execution")
+            } else {
+                format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
+            }
         } else if classify_agent_error(&stderr) == "auth_required" {
             format!("{provider} authentication required.")
         } else {
@@ -797,7 +812,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
 fn retry_after_failure(automatic: bool, _permission: &str, error: &str) -> bool {
     // Only the launcher can prove no agent code ran. A provider's error message
     // cannot prove absence of tool calls, writes, or network side effects.
-    automatic && retry_before_spawn(error)
+    automatic && (retry_before_spawn(error) || error.starts_with("PREEXEC:"))
 }
 
 fn retry_before_spawn(error: &str) -> bool {
@@ -816,9 +831,9 @@ mod execution_fallback_tests {
         }
     }
     #[test]
-    fn runtime_fallback_is_never_automatic_after_spawn() {
+    fn fallback_requires_proven_pre_execution_failure() {
         use super::retry_after_failure;
-        assert!(!retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
+        assert!(retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
         assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
         assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
         assert!(!retry_after_failure(true, "read-only", "CLI failed"));
