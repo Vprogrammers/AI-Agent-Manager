@@ -299,7 +299,7 @@ function App() {
     const requestRoot = root;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
     if(pendingPrompt) setOptimizerMetrics(prev=>({...prev,runs:prev.runs+1,addedEstimate:prev.addedEstimate+estimateTokens(text)-estimateTokens(pendingPrompt)}));
-    setPrompt(''); setPendingPrompt(null); setSuggestedPrompt(''); setSuggestionRevision(0); setUseOptimized(false); setOptimizerOpen(false); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
+    setPrompt(''); setPendingPrompt(null); setSuggestedPrompt(''); setSuggestionRevision(0); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
     setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider === 'codex' ? 'codex' : 'claude');
     setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
     setMessages(m => [...m, { role: 'user', text, provider: requestedProvider === 'codex' ? 'codex' : 'claude' }]);
