@@ -186,7 +186,7 @@ def usage_diagnostics(root, tool, output, reused_session, usage):
     path = store_path(root).with_name('usage-diagnostics.jsonl')
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a', encoding='utf-8') as stream:
-        stream.write(json.dumps(entry, ensure_ascii=False) + '\\n')
+        stream.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
 def record_usage(root, tool, model, seconds, usage, status, profile='default', task=None):
