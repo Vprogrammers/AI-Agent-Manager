@@ -388,6 +388,9 @@ fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), 
         return Err("Invalid permission mode".into());
     }
     if !cli_on_path(adapter.id) { return Err(format!("{} CLI not installed", adapter.id)); }
+    if !external_sandbox_ready(permission) {
+        return Err("OS sandbox unavailable for requested permission".into());
+    }
     match adapter.transport {
         ExecutionAdapter::Engine => {
             aam_executable().map(|_| ()).map_err(|_| "AAM engine unavailable".into())
@@ -448,6 +451,34 @@ fn macos_sandbox_profile(root: &Path) -> Result<String, String> {
     Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
 }
 
+// One platform isolation policy for both engine and direct CLI transports.
+// On unsupported platforms, never silently launch an unrestricted child.
+fn sandbox_command(executable: &Path, args: &[&str], root: &Path) -> Result<tokio::process::Command, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if !cli_on_path("bwrap") { return Err("bubblewrap unavailable".into()); }
+        let mut command = tokio::process::Command::new("bwrap");
+        command.args(["--die-with-parent", "--unshare-pid", "--new-session",
+            "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
+            "--proc", "/proc", "--tmpfs", "/tmp", "--bind"])
+            .arg(root).arg(root).arg("--chdir").arg(root)
+            .arg("--").arg(executable).args(args);
+        Ok(command)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !cli_on_path("sandbox-exec") { return Err("Seatbelt sandbox unavailable".into()); }
+        let mut command = tokio::process::Command::new("sandbox-exec");
+        command.arg("-p").arg(macos_sandbox_profile(root)?).arg(executable).args(args);
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (executable, args, root);
+        Err("No supported OS sandbox; execution blocked".into())
+    }
+}
+
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
         "gemini" => ("gemini", vec!["-p", prompt, "--output-format", "json"]),
@@ -465,26 +496,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             candidates
         }).find(|p| p.is_file())
     }).ok_or(format!("{provider} CLI not found in PATH"))?;
-    let mut command;
-    #[cfg(target_os = "linux")]
-    {
-        command = tokio::process::Command::new("bwrap");
-        command.args(["--die-with-parent", "--unshare-pid", "--new-session",
-            "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
-            "--proc", "/proc", "--tmpfs", "/tmp", "--bind"])
-            .arg(root).arg(root).arg("--chdir").arg(root)
-            .arg("--").arg(&executable).args(&args);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        command = tokio::process::Command::new("sandbox-exec");
-        command.arg("-p").arg(macos_sandbox_profile(root)?)
-            .arg(&executable).args(&args);
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        return Err("No supported sandbox on this platform".into());
-    }
+    let mut command = sandbox_command(&executable, &args, root)?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let stop = Arc::new(tokio::sync::Notify::new());
@@ -661,11 +673,14 @@ async fn verified_auth_probe(provider: &str) -> Option<bool> {
 
 #[tauri::command]
 async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
-    let mut child = tokio::process::Command::new(aam_executable()?);
+    // The AAM engine is isolated by the same OS boundary as external CLIs.
+    // Its child processes inherit this sandbox.
+    let executable = aam_executable()?;
+    let root_arg = root.to_str().ok_or("Invalid workspace path")?;
+    let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
+    let mut child = sandbox_command(&executable, &args, root)?;
     child.env("AAM_PERMISSION_MODE", permission);
-    child.arg(provider).arg("--root").arg(root).arg("--desktop-jsonl")
-        .arg("--ui").arg("classic").arg("--prompt").arg(prompt)
-        .stdout(std::process::Stdio::piped())
+    child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let mut child = child.spawn().map_err(|e| format!("Cannot launch aam: {e}"))?;
     let stop = Arc::new(tokio::sync::Notify::new());
