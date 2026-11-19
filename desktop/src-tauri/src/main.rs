@@ -411,6 +411,42 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     result
 }
 
+// Deterministic routing: task fit first, availability second. No paid model calls.
+fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static str> {
+    let p = prompt.to_ascii_lowercase();
+    let ordered: Vec<&str> = if p.contains("review") || p.contains("audit") || p.contains("security") || p.contains("bug") {
+        vec!["codex", "claude", "gemini", "opencode", "copilot"]
+    } else if p.contains("architecture") || p.contains("design") || p.contains("refactor") || p.contains("plan") {
+        vec!["claude", "gemini", "codex", "opencode", "copilot"]
+    } else if p.contains("github") || p.contains("pull request") || p.contains("issue") {
+        vec!["copilot", "codex", "claude", "gemini", "opencode"]
+    } else if p.contains("explain") || p.contains("document") || p.contains("summar") {
+        vec!["gemini", "claude", "codex", "opencode", "copilot"]
+    } else {
+        vec!["codex", "copilot", "claude", "opencode", "gemini"]
+    };
+    let mut candidates: Vec<&str> = ordered.into_iter().filter(|id|
+        permission == "workspace-write" || ["claude", "codex"].contains(id)
+    ).collect();
+    if mode == "balanced" {
+        // Balanced prefers general-purpose agents, while respecting task constraints.
+        candidates.sort_by_key(|id| match *id {
+            "claude" => 0, "codex" => 1, "gemini" => 2, "opencode" => 3, _ => 4
+        });
+    }
+    candidates
+}
+
+fn cli_on_path(binary: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            if dir.join(binary).is_file() { return true; }
+            cfg!(windows) && ["exe", "cmd", "bat"].iter()
+                .any(|ext| dir.join(format!("{binary}.{ext}")).is_file())
+        })
+    })
+}
+
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
     if !["claude", "codex", "gemini", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
@@ -420,8 +456,17 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
-    if ["gemini", "opencode", "copilot"].contains(&provider.as_str()) {
-        let result = run_external_provider(&app, &request_id, &path, &provider, &prompt, &permission).await;
+    let selected = if provider == "auto" || provider == "balanced" {
+        let candidates = route_candidates(&prompt, &provider, &permission);
+        let chosen = candidates.into_iter().find(|id| cli_on_path(id))
+            .ok_or("No compatible agent CLI is installed for the requested permission mode")?;
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"routing","reason":format!("Task-based routing selected {chosen}; available CLI detected"),"model":"CLI default"
+        }}));
+        chosen.to_string()
+    } else { provider.clone() };
+    if ["gemini", "opencode", "copilot"].contains(&selected.as_str()) {
+        let result = run_external_provider(&app, &request_id, &path, &selected, &prompt, &permission).await;
         if let Err(ref message) = result {
             let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{"kind":"process_error","message":message}}));
         }
@@ -429,7 +474,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     }
     let mut child = tokio::process::Command::new(aam_executable()?);
     child.env("AAM_PERMISSION_MODE", &permission);
-    child.arg(&provider).arg("--root").arg(&path).arg("--desktop-jsonl")
+    child.arg(&selected).arg("--root").arg(&path).arg("--desktop-jsonl")
         .arg("--ui").arg("classic").arg("--prompt").arg(&prompt)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
