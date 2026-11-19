@@ -361,15 +361,33 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
 // Only Linux bubblewrap is supported for third-party CLI execution.
 // Never fall back to an unsandboxed subprocess when the sandbox is unavailable.
 fn external_sandbox_ready(permission: &str) -> bool {
-    cfg!(target_os = "linux") && permission == "workspace-write" && cli_on_path("bwrap")
+    if permission != "workspace-write" { return false; }
+    #[cfg(target_os = "linux")]
+    { return cli_on_path("bwrap"); }
+    #[cfg(target_os = "macos")]
+    { return cli_on_path("sandbox-exec"); }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { false }
 }
 
 fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), String> {
     if !external_sandbox_ready(permission) {
-        return Err("External agents require Linux bubblewrap with workspace-write permission; execution blocked on this platform".into());
+        return Err("No supported OS sandbox for this permission mode; execution blocked".into());
     }
     if !cli_on_path(provider) { return Err(format!("{provider} CLI not installed")); }
     Ok(())
+}
+
+// Escape the workspace for macOS Seatbelt's quoted sandbox profile syntax.
+// The profile grants writes only to the selected workspace and ephemeral /tmp.
+#[cfg(target_os = "macos")]
+fn macos_sandbox_profile(root: &Path) -> Result<String, String> {
+    let path = root.to_str().ok_or("Workspace path is not UTF-8")?;
+    if path.chars().any(|c| c == '\\0' || c == '\\n' || c == '\\r') {
+        return Err("Unsupported workspace path".into());
+    }
+    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath \\"{escaped}\\") (subpath \\"/private/tmp\\") (subpath \\"/tmp\\") (literal \\"/dev/null\\"))"))
 }
 
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
@@ -389,15 +407,27 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             candidates
         }).find(|p| p.is_file())
     }).ok_or(format!("{provider} CLI not found in PATH"))?;
-    // Read-only host filesystem, writable selected workspace, private /tmp and /proc.
-    // No privilege escalation; do not expose the host filesystem as writable.
-    let mut command = tokio::process::Command::new("bwrap");
-    command.args(["--die-with-parent", "--unshare-pid", "--new-session",
-        "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
-        "--proc", "/proc", "--tmpfs", "/tmp", "--bind"])
-        .arg(root).arg(root).arg("--chdir").arg(root)
-        .arg("--").arg(executable).args(args)
-        .current_dir(root).stdin(std::process::Stdio::null())
+    let mut command;
+    #[cfg(target_os = "linux")]
+    {
+        command = tokio::process::Command::new("bwrap");
+        command.args(["--die-with-parent", "--unshare-pid", "--new-session",
+            "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
+            "--proc", "/proc", "--tmpfs", "/tmp", "--bind"])
+            .arg(root).arg(root).arg("--chdir").arg(root)
+            .arg("--").arg(&executable).args(&args);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        command = tokio::process::Command::new("sandbox-exec");
+        command.arg("-p").arg(macos_sandbox_profile(root)?)
+            .arg(&executable).args(&args);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        return Err("No supported sandbox on this platform".into());
+    }
+    command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let stop = Arc::new(tokio::sync::Notify::new());
     {
