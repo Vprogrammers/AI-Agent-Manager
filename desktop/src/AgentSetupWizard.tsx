@@ -2,10 +2,11 @@ import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+type ProviderId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'copilot';
 type NodeStatus = { installed: boolean; detail: string; installer: string };
 
 type ProviderStatus = {
-  id: 'claude' | 'codex';
+  id: ProviderId;
   installed: boolean;
   authenticated: boolean;
   authStatus: 'ready' | 'missing' | 'login_required' | 'unknown';
@@ -25,6 +26,24 @@ const setup = {
     install: 'npm install -g @openai/codex',
     login: 'codex login',
   },
+  gemini: {
+    name: 'Gemini CLI',
+    docs: 'https://google-gemini.github.io/gemini-cli/docs/get-started/',
+    install: 'npm install -g @google/gemini-cli',
+    login: 'gemini',
+  },
+  opencode: {
+    name: 'OpenCode',
+    docs: 'https://opencode.ai/docs/cli/providers/',
+    install: 'npm install -g @opencode/cli',
+    login: 'opencode auth login',
+  },
+  copilot: {
+    name: 'GitHub Copilot CLI',
+    docs: 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli',
+    install: 'npm install -g @github/copilot',
+    login: 'copilot login',
+  },
 } as const;
 
 export default function AgentSetupWizard() {
@@ -37,7 +56,7 @@ export default function AgentSetupWizard() {
   const [working, setWorking] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState('');
   const [authPending, setAuthPending] = React.useState(false);
-  const [authProvider, setAuthProvider] = React.useState<'claude' | 'codex' | null>(null);
+  const [authProvider, setAuthProvider] = React.useState<ProviderId | null>(null);
   const [terminalOutput, setTerminalOutput] = React.useState('');
   const [terminalInput, setTerminalInput] = React.useState('');
   const [terminalOpen, setTerminalOpen] = React.useState(false);
@@ -85,7 +104,7 @@ export default function AgentSetupWizard() {
     } catch (e) { setError(String(e)); }
     finally { setWorking(null); }
   };
-  const perform = async (id: 'claude' | 'codex', action: 'install' | 'login') => {
+  const perform = async (id: ProviderId, action: 'install' | 'login') => {
     if (action === 'install' && !window.confirm('Install ' + setup[id].name + ' globally using npm? This downloads software from the npm registry and changes your system environment.')) return;
     setWorking(id); setError(''); setNotice('');
     if (action === 'login') { setTerminalOutput(''); setTerminalOpen(true); }
@@ -147,7 +166,7 @@ export default function AgentSetupWizard() {
     {open && <div className="setup-overlay" role="presentation">
       <section className="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
         <div className="setup-top">
-          <div><h2 id="setup-title">Set up AI agents</h2><p className="hint">Install and sign in to at least one CLI to run AI requests. No credentials are collected by this app.</p></div>
+          <div><h2 id="setup-title">Set up AI agents</h2><p className="hint">Install and sign in to an agent CLI. Gemini, OpenCode and Copilot execution support is not yet wired into the AAM engine. No credentials are collected by this app.</p></div>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }} aria-label="Close setup">Close</button>
         </div>
         {error && <p role="alert" className="error">{error}</p>}
@@ -158,7 +177,7 @@ export default function AgentSetupWizard() {
           {!node?.installed && <button type="button" disabled={!!working || checking} onClick={() => void installNode()}>{working === 'node' ? 'Installing Node.js…' : 'Install Node.js automatically'}</button>}
         </div>
         <div className="setup-providers">
-          {(['claude', 'codex'] as const).map(id => {
+          {(['claude', 'codex', 'gemini', 'opencode', 'copilot'] as const).map(id => {
             const item = statuses.find(s => s.id === id);
             const guide = setup[id];
             const installed = item?.installed;
@@ -168,6 +187,7 @@ export default function AgentSetupWizard() {
               {!installed && <div><p>1. Install the CLI (requires Node.js/npm):</p><button type="button" disabled={!!working || !node?.installed} onClick={() => void perform(id, "install")}>{working === id ? "Installing…" : "Install automatically"}</button><details><summary>Manual alternative</summary><code>{guide.install}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.install)}>Copy</button></details></div>}
               {installed && !authenticated && <div><p>2. Authenticate using the provider browser flow:</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>Open login</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
               {authenticated && <p>CLI installed and authentication confirmed.</p>}
+              {installed && item?.authStatus === 'unknown' && <p className="hint">Authentication is not independently verified for this provider. Complete the provider login flow and check its own account status. The app will not claim Ready without verification.</p>}
               <p className="hint">{item?.detail || 'Checking CLI status…'} · <a href={guide.docs} target="_blank" rel="noopener noreferrer">Official setup guide</a></p>
             </div>;
           })}
