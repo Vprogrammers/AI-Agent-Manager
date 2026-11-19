@@ -136,6 +136,19 @@ function expandPrompt(text: string): {draft:string; questions:string[]} {
   ].join('\n');
   return {draft,questions};
 }
+const SESSION_PREFIX = 'aam.desktop.session.v1:';
+function loadSession(path: string): Message[] {
+  if (!path) return [];
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(SESSION_PREFIX + path) || '[]');
+    if (!Array.isArray(saved)) return [];
+    return saved.filter((m): m is Message =>
+      m !== null && typeof m === 'object' && (m.role === 'user' || m.role === 'assistant') &&
+      typeof m.text === 'string' && typeof m.provider === 'string'
+    ).slice(-100);
+  } catch { return []; }
+}
+
 function App() {
   const [root, setRoot] = React.useState('');
   const [aiConfig, setAiConfig] = React.useState<AiConfigItem[]>([]);
@@ -169,6 +182,10 @@ function App() {
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
   const [messages, setMessages] = React.useState<Message[]>([]);
+  React.useEffect(() => {
+    if (!root) return;
+    try { localStorage.setItem(SESSION_PREFIX + root, JSON.stringify(messages.slice(-100))); } catch { /* storage may be disabled or full */ }
+  }, [root, messages]);
   const [pendingPrompt, setPendingPrompt] = React.useState<string | null>(null);
   const [suggestedPrompt, setSuggestedPrompt] = React.useState('');
   const [strategy, setStrategy] = React.useState<Strategy>('balanced');
@@ -224,7 +241,7 @@ function App() {
   React.useEffect(()=>{void refreshDiagnostics();},[root]);
   const selectWorkspace = (path: string) => {
     if (busy) { setError('Wait for the current request to finish or stop it before changing workspaces.'); return; }
-    setRoot(path); void scanAiConfig(path); void scanArchitect(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages([]); setError(''); setPendingSwitch(false); setFailedPrompt('');
+    setRoot(path); void scanAiConfig(path); void scanArchitect(path); setUsageHistory(loadUsage(path)); setLastUsage({}); setUsage('Not reported'); setMessages(loadSession(path)); setError(''); setPendingSwitch(false); setFailedPrompt('');
     const next = [path, ...recent.filter(p => p !== path)].slice(0, 8);
     setRecent(next); localStorage.setItem(WORKSPACES_KEY, JSON.stringify(next));
   };
@@ -272,6 +289,7 @@ function App() {
     if (!window.confirm('Start a fresh Claude/Codex session for this workspace? Saved conversation references and handoff context will be cleared. Usage history and files will remain.')) return;
     try {
       await invoke('clear_agent_session', {root});
+      localStorage.removeItem(SESSION_PREFIX + root);
       setMessages([]); setPrompt(''); setLastUsage({}); setUsage('Not reported');
       setError(''); setActivity(''); setLiveText(''); setLimitNotice('');
       setPendingSwitch(false); setFailedPrompt('');
