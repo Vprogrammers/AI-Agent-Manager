@@ -765,7 +765,7 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
         ExecutionAdapter::Engine =>
             run_engine_adapter(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
         ExecutionAdapter::SandboxedCli =>
-            run_external_provider(app, request_id, root, adapter.id, prompt, permission).await,
+            run_external_provider(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
     };
     if let Ok(mut requests) = app.state::<RunningRequests>().0.lock() {
         requests.remove(request_id);
