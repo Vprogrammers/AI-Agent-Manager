@@ -62,18 +62,19 @@ def measure(command, cwd, timeout):
     # separate reader thread rather than assuming the first output is the end.
     import threading
     first = [None]
+    first_stderr = [None]
     chunks = []
     errors = []
-    def drain(stream, target, record_first=False):
+    def drain(stream, target, first_timestamp=None):
         while True:
             block = stream.read(1)
             if not block:
                 break
-            if record_first and first[0] is None:
-                first[0] = time.perf_counter()
+            if first_timestamp is not None and first_timestamp[0] is None:
+                first_timestamp[0] = time.perf_counter()
             target.append(block)
-    out_thread = threading.Thread(target=drain, args=(proc.stdout, chunks, True), daemon=True)
-    err_thread = threading.Thread(target=drain, args=(proc.stderr, errors), daemon=True)
+    out_thread = threading.Thread(target=drain, args=(proc.stdout, chunks, first), daemon=True)
+    err_thread = threading.Thread(target=drain, args=(proc.stderr, errors, first_stderr), daemon=True)
     out_thread.start()
     err_thread.start()
     try:
@@ -97,6 +98,8 @@ def measure(command, cwd, timeout):
     return {
         "spawn_ms": round((spawned - started) * 1000),
         "first_stdout_ms": round((first[0] - started) * 1000) if first[0] else None,
+        "first_stderr_ms": round((first_stderr[0] - started) * 1000) if first_stderr[0] else None,
+        # These timestamps describe OS pipe output, not model tokens.
         "total_ms": round((ended - started) * 1000),
         "exit_code": proc.returncode,
         "timeout": timed_out,
