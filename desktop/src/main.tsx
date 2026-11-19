@@ -100,14 +100,14 @@ function previewPrompt(text: string): {optimized:string; removed:number} {
   let fenced = false;
   let removed = 0;
   const lines: string[] = [];
-  for (const line of text.split('\\n')) {
+  for (const line of text.split('\n')) {
     const key = line.trim();
     if (key.startsWith('```') || key.startsWith('~~~')) { fenced = !fenced; lines.push(line); continue; }
     if (!fenced && key.length >= 24 && seen.has(key)) { removed++; continue; }
     lines.push(line);
     if (!fenced && key) seen.add(key);
   }
-  return {optimized:lines.join('\\n'),removed};
+  return {optimized:lines.join('\n'),removed};
 }
 function App() {
   const [root, setRoot] = React.useState('');
