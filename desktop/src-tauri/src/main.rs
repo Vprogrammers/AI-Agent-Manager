@@ -646,6 +646,7 @@ fn safe_provider_diagnostic(stderr: &str) -> String {
 }
 
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
+    let phase_started = std::time::Instant::now();
     let (binary, args): (&str, Vec<&str>) = match provider {
         "antigravity" => ("agy", vec!["--print", prompt]),
         "opencode" => ("opencode", vec!["run", prompt]),
@@ -659,8 +660,12 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     #[cfg(unix)]
     isolate_process_group(&mut command);
+    let setup_ms = phase_started.elapsed().as_millis();
     let result = async {
-        let mut child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
+        let mut child = command.spawn().map_err(|e| format!("PRESTART: Could not start {provider} CLI: {e}"))?;
+        let spawn_ms = phase_started.elapsed().as_millis().saturating_sub(setup_ms);
+        let process_started = std::time::Instant::now();
+        let mut first_output_ms: Option<u128> = None;
         #[cfg(unix)]
         let group_pid = child.id();
         let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
@@ -677,6 +682,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         let mut answer = String::new();
         let read_result = await_runtime(async {
             while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+                if first_output_ms.is_none() { first_output_ms = Some(process_started.elapsed().as_millis()); }
                 if answer.len() + line.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
                 answer.push_str(&line);
                 answer.push('\n');
@@ -700,6 +706,12 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task)
                 .await.ok().and_then(Result::ok).unwrap_or_default()
         };
+        let process_ms = process_started.elapsed().as_millis();
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"cli_phases","provider":provider,"setupMs":setup_ms,
+            "spawnMs":spawn_ms,"firstOutputMs":first_output_ms,
+            "processMs":process_ms,"exitCode":read_result.as_ref().ok().and_then(|status|status.code())
+        }}));
         let status = read_result?;
         if !status.success() {
             let kind = classify_agent_error(&format!("{} {}", stderr, answer.chars().take(8192).collect::<String>()));
