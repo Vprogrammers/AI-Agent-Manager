@@ -222,17 +222,28 @@ def stream_runner(cmd, cwd, tool, model, env=None, on_event=None, cancel_event=N
     return bounded_stream_runner(cmd, cwd, tool, model, env, on_event=on_event, cancel_event=cancel_event)
 
 def limit_summary(tool, stdout, stderr):
-    """Return a short, safe provider-limit message without exposing raw JSON."""
-    raw = '\n'.join((stdout or '', stderr or ''))
-    if not LIMIT.search(raw):
+    """Classify provider limits only from explicit errors, not generated text."""
+    details = ''
+    if tool == 'claude':
+        try:
+            payload = json.loads(stdout)
+        except (ValueError, TypeError):
+            payload = {}
+        if isinstance(payload, dict) and payload.get('is_error') is True:
+            details = str(payload.get('result') or '') + ' ' + str(payload.get('api_error') or '')
+    else:
+        for line in (stdout or '').splitlines():
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(payload, dict) and payload.get('type') in ('error', 'turn.failed'):
+                details += ' ' + str(payload.get('message') or payload.get('error') or '')
+    # Stderr is diagnostic output; it can contain arbitrary model text.
+    # Do not infer a quota failure from it when the CLI completed successfully.
+    if not LIMIT.search(details):
         return None
-    details = raw
-    try:
-        payload = json.loads(stdout)
-        details = str(payload.get('result') or payload.get('error') or raw)
-    except (ValueError, TypeError, AttributeError):
-        pass
-    reset = re.search(r'resets?\s+([^"\\\\n]+?)(?=[."]|$)', details, re.I)
+    reset = re.search(r'resets?\\s+([^"\\\\n]+?)(?=[."]|$)', details, re.I)
     result = f'{tool.capitalize()} | LIMIT REACHED'
     if reset:
         result += f' | resets {reset.group(1).strip()}'
