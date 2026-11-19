@@ -52,7 +52,7 @@ def run_codex_app_server(cwd, prompt, session_id=None, model=None, env=None,
                 buffer.extend(ch)
                 if len(buffer) > 2 * 1024 * 1024:
                     raise RuntimeError('Codex App Server event exceeds size limit')
-        raise TimeoutError('Codex App Server timed out')
+        raise RuntimeError('Codex App Server timed out')
     def request(method, params, timeout=30):
         request_id = send(method, params)
         deadline = time.monotonic() + timeout
@@ -107,6 +107,8 @@ def run_codex_app_server(cwd, prompt, session_id=None, model=None, env=None,
                 usage = {k: last[v] for k, v in [('input_tokens', 'inputTokens'),
                          ('cached_input_tokens', 'cachedInputTokens'), ('output_tokens', 'outputTokens')]
                          if isinstance(last.get(v), int)}
+            elif method == 'turn/failed':
+                raise RuntimeError('Codex turn failed: ' + str(params.get('error') or params))
             elif method == 'turn/completed':
                 completed_turn = params.get('turn') or {}
                 if completed_turn.get('id') != turn_id:
