@@ -831,6 +831,19 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
                 last_preflight_error = message;
                 continue;
             }
+            // A failed read-only run may be retried with another agent.
+            // Write-capable runs are never replayed after launch.
+            Err(message) if automatic && permission == "read-only"
+                && message != "Request cancelled"
+                && message != "Request stopped by user"
+                && !message.contains("timed out") => {
+                last_preflight_error = message;
+                let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                    "kind":"routing","provider":candidate,
+                    "reason":"Read-only execution failed; trying next available provider"
+                }}));
+                continue;
+            }
             outcome => return outcome,
         }
     }
