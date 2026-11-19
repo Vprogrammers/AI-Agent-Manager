@@ -1,4 +1,24 @@
 /** Local, deterministic prompt suggestions. No provider calls. */
+export type Agent = 'claude'|'codex'|'other';
+export type PromptMetrics = {originalEstimate:number; proposedEstimate:number; deltaEstimate:number};
+export function estimateTokens(text:string):number {return Math.ceil(text.length/4);}
+export function promptDiff(original:string, proposed:string):{added:string[];removed:string[]} {
+ const before=new Set(original.split('\n').map(x=>x.trim()).filter(Boolean));
+ const after=new Set(proposed.split('\n').map(x=>x.trim()).filter(Boolean));
+ return {added:[...after].filter(x=>!before.has(x)),removed:[...before].filter(x=>!after.has(x))};
+}
+export function validateSuggestion(original:string, proposed:string):{safe:boolean;issues:string[]} {
+ const issues:string[]=[];
+ if(!proposed.includes(original.trim())) issues.push('Original request is not preserved verbatim.');
+ const critical=/\b(?:do not|don't|never|without|only|must|nemoj|nikad|samo|bez|ne sme|ne smije)\b/i;
+ const constraints=original.split(/[\n.!?]+/).map(x=>x.trim()).filter(x=>critical.test(x));
+ for(const constraint of constraints) if(!proposed.includes(constraint)) issues.push('A constraint may be missing: '+constraint.slice(0,90));
+ return {safe:issues.length===0,issues};
+}
+export function followupContext(text:string, previous?:string):string {
+ if(!previous||!/(?:^|\s)(?:now|continue|again|same|that|this|sada|nastavi|opet|isto|to|ovo)(?:\s|$)/i.test(text))return '';
+ return 'Related prior user request (verify current repository state): '+previous.slice(0,350);
+}
 export type Strategy = 'concise'|'balanced'|'detailed';
 export type Analysis = {kind:string; clarity:number; missing:string[]; relevantFiles:string[]; instructions:string[]; estimate:number; suggestion:string; unchanged:boolean};
 const patterns: [string,RegExp][] = [
@@ -19,7 +39,7 @@ const steps: Record<string,string[]> = {
 export function isDirectCommand(text:string):boolean {
  return /^(?:(?:run|execute|pokreni|izvrši|izvrsi)\s+)?git\s+(?:status|branch|diff|log|rev-parse)(?:\s+[-\w./]+)*\s*$/i.test(text.trim());
 }
-export function analyzePrompt(text:string, files:string[]=[], instructions:string[]=[], strategy:Strategy='balanced', existingSession=false):Analysis {
+export function analyzePrompt(text:string, files:string[]=[], instructions:string[]=[], strategy:Strategy='balanced', existingSession=false, agent:Agent='other', previousRequest='', maxExtraTokens=120):Analysis {
  const original=text.trim();
  if (!original) return {kind:'general',clarity:0,missing:[],relevantFiles:[],instructions:[],estimate:0,suggestion:'',unchanged:true};
  if (isDirectCommand(original)) return {kind:'command',clarity:100,missing:[],relevantFiles:[],instructions:[],estimate:Math.ceil(original.length/4),suggestion:original,unchanged:true};
@@ -36,14 +56,21 @@ export function analyzePrompt(text:string, files:string[]=[], instructions:strin
  const detailed=steps[kind];
  const selected=strategy==='concise'?concise:strategy==='balanced'?balanced:detailed;
  const additions:string[]=[];
+ const prior=followupContext(original,previousRequest);
+ if(prior) additions.push(prior);
  if(!existingSession&&instructions.length) additions.push('Follow existing project instructions: '+instructions.slice(0,4).join(', ')+'.');
  if(relevantFiles.length&&strategy!=='concise') additions.push('Check potentially relevant files (verify before editing): '+relevantFiles.join(', ')+'.');
  additions.push(...selected);
+ if(agent==='claude'&&strategy==='detailed')additions.push('Explain the reasoning behind nontrivial design decisions concisely.');
+ if(agent==='codex'&&strategy==='detailed')additions.push('Prefer focused patches and report concrete test commands.');
  if(strategy==='detailed') additions.push('Report changed files, checks executed, and unresolved risks.');
  if(missing.length&&strategy!=='concise') additions.push('Clarify blocking ambiguity instead of assuming: '+missing.join(' '));
  // Do not expand an already detailed request, or duplicate guidance already present.
  const unique=additions.filter(a=>!original.toLowerCase().includes(a.toLowerCase()));
- const suggestion=original.length>700||!unique.length?original:original+'\n\n'+unique.map(a=>'- '+a).join('\n');
+ const budget=Math.max(0,maxExtraTokens)*4;
+ const chosen:string[]=[];let remaining=budget;
+ for(const item of unique){const line='- '+item+'\n';if(line.length<=remaining){chosen.push(line.trimEnd());remaining-=line.length;}}
+ const suggestion=original.length>700||!chosen.length?original:original+'\n\n'+chosen.join('\n');
  return {kind,clarity,missing,relevantFiles,instructions,estimate:Math.ceil(suggestion.length/4),suggestion,unchanged:suggestion===original};
 }
 export type Feedback = {approved:number;edited:number;regenerated:number;rejected:number;strategy:Record<Strategy,number>};
