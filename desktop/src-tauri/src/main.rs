@@ -445,10 +445,10 @@ fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), S
 fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String> {
     fn quoted(path: &Path) -> Result<String, String> {
         let text = path.to_str().ok_or("Sandbox path is not UTF-8")?;
-        if text.chars().any(|c| c == '\\0' || c == '\\n' || c == '\\r') {
+        if text.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
             return Err("Unsupported sandbox path".into());
         }
-        Ok(text.replace('\\\\', "\\\\\\\\").replace('"', "\\\""))
+        Ok(text.replace('\\', "\\\\").replace('"', "\\\""))
     }
     if permission != "read-only" && permission != "workspace-write" {
         return Err("Unsupported sandbox permission".into());
