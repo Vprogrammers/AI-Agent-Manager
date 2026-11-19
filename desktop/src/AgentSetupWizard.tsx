@@ -46,6 +46,23 @@ const setup = {
   },
 } as const;
 
+// Gemini and other CLIs draw full-screen terminal UIs using ANSI sequences.
+// Display readable text instead of exposing raw escape codes in the setup panel.
+function readableTerminal(raw: string): string {
+  return raw
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[()][0-9A-Za-z]/g, '')
+    .replace(/\x1b[=>]/g, '')
+    .replace(/\x1b./g, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .slice(-35)
+    .join('\n');
+}
+
 export default function AgentSetupWizard() {
   const [statuses, setStatuses] = React.useState<ProviderStatus[]>([]);
   const [node, setNode] = React.useState<NodeStatus | null>(null);
@@ -181,7 +198,7 @@ export default function AgentSetupWizard() {
         {notice && <p role="status" className="hint">{notice}</p>}
         {(terminalOpen || terminalOutput) && <div className="setup-provider" aria-label="Embedded provider login terminal">
           <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
-          <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
+          <pre className="setup-terminal" aria-live="off">{readableTerminal(terminalOutput) || 'Waiting for provider login…'}</pre>
           {terminalOpen && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setNotice('Login interruption requested. Wait for the terminal to close before retrying.'); } catch (e) { setError(String(e)); } }}>Cancel active login</button>}
           {terminalOpen && <div className="setup-terminal-controls" aria-label="Interactive terminal navigation">
             <button type="button" onClick={() => void sendPty('\x1b[A')}>Up</button>
