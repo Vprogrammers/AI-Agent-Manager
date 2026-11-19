@@ -57,6 +57,8 @@ def build_command(tool, model, session_id, prompt):
         raise ValueError('Invalid AAM_PERMISSION_MODE')
     if tool == 'claude':
         cmd = ['claude', '-p', '--output-format', 'json']
+        if os.environ.get('AAM_DESKTOP_STREAM') == '1':
+            cmd = ['claude', '-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages']
         if permission == 'workspace-write':
             cmd += ['--permission-mode', 'acceptEdits']
         elif permission == 'full-access':
