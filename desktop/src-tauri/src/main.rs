@@ -599,17 +599,20 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
 
 // Deterministic routing: task fit first, availability second. No paid model calls.
 fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static str> {
-    let p = prompt.to_ascii_lowercase();
-    let ordered: Vec<&str> = if p.contains("review") || p.contains("audit") || p.contains("security") || p.contains("bug") {
+    let p = prompt.to_lowercase();
+    let contains_any = |terms: &[&str]| terms.iter().any(|term| p.contains(term));
+    let ordered: Vec<&str> = if contains_any(&["antigravity", "gemini", "agy"]) {
+        vec!["antigravity", "claude", "codex", "opencode", "copilot"]
+    } else if contains_any(&["review", "audit", "security", "bug", "test", "debug", "grešk", "gresk", "testir", "provjer", "prover"]) {
         vec!["codex", "claude", "antigravity", "opencode", "copilot"]
-    } else if p.contains("architecture") || p.contains("design") || p.contains("refactor") || p.contains("plan") {
+    } else if contains_any(&["architecture", "design", "refactor", "plan", "arhitektur", "dizajn", "planir"]) {
         vec!["claude", "antigravity", "codex", "opencode", "copilot"]
-    } else if p.contains("github") || p.contains("pull request") || p.contains("issue") {
+    } else if contains_any(&["github", "pull request", "issue"]) {
         vec!["copilot", "codex", "claude", "antigravity", "opencode"]
-    } else if p.contains("explain") || p.contains("document") || p.contains("summar") {
+    } else if contains_any(&["explain", "document", "summar", "objasn", "dokument", "saž", "saz", "analizir", "analiz", "prijedlog", "predlog"]) {
         vec!["antigravity", "claude", "codex", "opencode", "copilot"]
     } else {
-        vec!["codex", "copilot", "claude", "opencode", "antigravity"]
+        vec!["codex", "antigravity", "claude", "opencode", "copilot"]
     };
     let mut candidates: Vec<&str> = ordered.into_iter().filter(|id|
         permission == "workspace-write" || ["claude", "codex"].contains(id)
@@ -627,6 +630,12 @@ fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static 
 mod routing_tests {
     use super::route_candidates;
 
+    #[test]
+    fn serbian_analysis_prefers_antigravity_and_explicit_request_is_honored() {
+        assert_eq!(route_candidates("Analiziraj projekat i daj prijedlog", "auto", "workspace-write")[0], "antigravity");
+        assert_eq!(route_candidates("Use Antigravity to inspect this repository", "auto", "workspace-write")[0], "antigravity");
+        assert_eq!(route_candidates("Analiziraj arhitekturu", "auto", "workspace-write")[0], "claude");
+    }
     #[test]
     fn task_fit_prefers_expected_provider() {
         assert_eq!(route_candidates("Review security bug", "auto", "workspace-write")[0], "codex");
