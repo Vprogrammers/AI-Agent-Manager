@@ -207,7 +207,8 @@ function App() {
         if (kind === 'routing') {
           setActivity('Auto: '+String(data.reason || 'Routing')+' · '+String(data.model || 'CLI default'));
         } else if (kind === 'provider' && (['claude', 'codex', 'gemini', 'opencode', 'copilot'].includes(String(data.provider)))) {
-          setLastProvider(data.provider); setLiveProvider(data.provider); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(data.provider); setActivity('Running '+data.provider);
+          const selectedProvider = String(data.provider) as Provider;
+          setLastProvider(selectedProvider); setLiveProvider(selectedProvider); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(selectedProvider); setActivity('Running '+selectedProvider);
         } else if (kind === 'activity') {
           const ev = data.event as Record<string,unknown> | undefined;
           if (ev) {
