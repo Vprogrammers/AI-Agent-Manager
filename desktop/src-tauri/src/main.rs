@@ -501,7 +501,7 @@ fn kill_process_group(pid: Option<u32>) {
     if let Some(pid) = pid {
         // Negative PID targets the entire group, not only the leader.
         let _ = std::process::Command::new("/bin/kill")
-            .args(["-KILL", &format!("-{pid}")])
+            .args(["-KILL", "--", &format!("-{pid}")])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
