@@ -655,7 +655,10 @@ mod routing_tests {
     #[test]
     fn external_sandbox_rejects_unsupported_permissions() {
         use super::external_sandbox_ready;
-        assert!(!external_sandbox_ready("read-only"));
+        // Availability depends on installed OS tools (bwrap on Linux, sandbox-exec on macOS).
+        // Assert the permission contract, not the CI runner's installed binaries.
+        assert_eq!(external_sandbox_ready("read-only"), external_sandbox_ready("workspace-write"));
+        assert!(!external_sandbox_ready("invalid"));
         assert!(!external_sandbox_ready("full-access"));
     }
 
