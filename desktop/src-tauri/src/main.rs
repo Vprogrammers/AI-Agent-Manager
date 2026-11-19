@@ -449,10 +449,10 @@ fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String
     }
     let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
     if permission == "read-only" {
-        return Ok(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#.to_string());
+        return Ok(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#.to_string());
     }
     if permission != "workspace-write" { return Err("Unsupported sandbox permission".into()); }
-    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
@@ -462,7 +462,7 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &s
     {
         if !cli_on_path("bwrap") { return Err("bubblewrap unavailable".into()); }
         let mut command = tokio::process::Command::new("bwrap");
-        command.args(["--die-with-parent", "--unshare-pid", "--new-session",
+        command.args(["--die-with-parent", "--unshare-pid", "--unshare-net", "--new-session",
             "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
             "--proc", "/proc", "--tmpfs", "/tmp"]);
         if permission == "workspace-write" {
@@ -727,9 +727,6 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
-    if let Err(message) = result.as_ref() {
-        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
-    }
     let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
     if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
         set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
@@ -740,7 +737,6 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         } else if classify_agent_error(&stderr) == "auth_required" {
             format!("{provider} authentication required.")
         } else { format!("{provider} engine exited unsuccessfully. Check CLI diagnostics.") };
-        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
         return Err(message);
     }
     result.map(|_| ())
@@ -804,11 +800,6 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
     if let Ok(mut requests) = app.state::<RunningRequests>().0.lock() {
         requests.remove(request_id);
     }
-    if let Err(ref message) = result {
-        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
-            "kind":"process_error","provider":adapter.id,"message":message
-        }}));
-    }
     result
 }
 
@@ -855,9 +846,19 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
                 }}));
                 continue;
             }
-            outcome => return outcome,
+            outcome => {
+                if let Err(ref message) = outcome {
+                    let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                        "kind":"process_error","provider":candidate,"message":message
+                    }}));
+                }
+                return outcome;
+            },
         }
     }
+    let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+        "kind":"process_error","message":last_preflight_error
+    }}));
     Err(last_preflight_error)
 }
 
