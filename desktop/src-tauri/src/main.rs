@@ -833,13 +833,11 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     result.map(|_| ())
 }
 
-// A failure is replay-safe only if it happened before the agent process started.
-// Runtime errors are deliberately not eligible: even read-only prompts can
-// invoke external tools with side effects.
+// Auto/Balanced advances on provider limits even after a process started.
+// The next provider receives a continuation request to inspect existing changes,
+// rather than blindly repeating the original instructions.
 fn retry_after_failure(automatic: bool, _permission: &str, error: &str) -> bool {
-    // Only the launcher can prove no agent code ran. A provider's error message
-    // cannot prove absence of tool calls, writes, or network side effects.
-    automatic && (retry_before_spawn(error) || error.starts_with("PREEXEC:"))
+    automatic && (retry_before_spawn(error) || error.starts_with("PREEXEC:") || error.contains("rate limit detected"))
 }
 
 fn retry_before_spawn(error: &str) -> bool {
@@ -862,6 +860,8 @@ mod execution_fallback_tests {
         use super::retry_after_failure;
         assert!(retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
         assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
+        assert!(retry_after_failure(true, "workspace-write", "claude rate limit detected; cooldown 5 minutes. Automatic replay blocked."));
+        assert!(!retry_after_failure(false, "workspace-write", "claude rate limit detected; cooldown 5 minutes. Automatic replay blocked."));
         assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
         assert!(!retry_after_failure(true, "read-only", "CLI failed"));
         assert!(!retry_after_failure(false, "read-only", "CLI failed"));
@@ -926,6 +926,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         vec![provider.as_str()]
     };
     let mut last_preflight_error = String::from("No compatible agent CLI available");
+    let mut continue_after_limit = false;
     for candidate in candidates {
         let Some(adapter) = provider_adapter(candidate) else { continue; };
         if automatic && !provider_available(candidate, &app.state::<ProviderCooldowns>()) {
@@ -943,14 +944,19 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             "kind":"routing","reason":format!("Executing {candidate}; preflight passed"),
             "provider":candidate,"model":"CLI default"
         }}));
-        // An adapter that has started may have modified files or emitted effects.
-        // Never replay such a task automatically, even if it reports a rate limit.
-        match execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await {
+        // Provider limits trigger a continuation on the next available provider.
+        let continuation_prompt;
+        let active_prompt = if continue_after_limit {
+            continuation_prompt = format!("Continue the user's task from the CURRENT repository state. Inspect git status and diff first; do not repeat completed edits or operations. Original request:\n{prompt}");
+            continuation_prompt.as_str()
+        } else { prompt.as_str() };
+        match execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await {
             Err(message) if retry_after_failure(automatic, &permission, &message) => {
+                continue_after_limit |= message.contains("rate limit detected");
                 last_preflight_error = message;
                 let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
                     "kind":"routing","provider":candidate,
-                    "reason":"Execution failed; trying next available provider"
+                    "reason":"Provider unavailable; continuing with next available provider"
                 }}));
                 continue;
             }
