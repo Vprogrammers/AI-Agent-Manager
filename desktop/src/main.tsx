@@ -427,12 +427,12 @@ function App() {
             const step = describeAgentStep(ev);
             if (step) setAgentSteps(previous=>[...previous,step].slice(-120));
             const eventType = String(ev.type || 'activity');
-            if (eventType === 'external.output' && typeof ev.text === 'string') {
-              streamText += ev.text + '\\n';
+            if ((eventType === 'external.output' || eventType === 'external.chunk') && typeof ev.text === 'string') {
+              streamText += ev.text + (eventType === 'external.output' ? '\\n' : '');
               setLiveText(streamText);
             }
             const item = ev.item as Record<string,unknown> | undefined;
-            setActivity(eventType + (item?.type ? ' · '+item.type : ''));
+            if (eventType !== 'external.chunk') setActivity(eventType + (item?.type ? ' · '+item.type : ''));
             // Claude emits content_block_delta; Codex emits agent_message deltas.
             // Some CLI versions only emit completed messages: render those as snapshots.
             const delta = ev.delta as Record<string,unknown> | undefined;
