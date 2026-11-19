@@ -771,26 +771,35 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
-    let selected = if provider == "auto" || provider == "balanced" {
-        let candidates = route_candidates(&prompt, &provider, &permission);
-        let cooldowns = app.state::<ProviderCooldowns>();
-        let mut chosen = None;
-        for candidate in candidates {
-            let Some(adapter) = provider_adapter(candidate) else { continue; };
-            if !provider_available(candidate, &cooldowns) { continue; }
-            if validate_execution(adapter, &permission).is_err() { continue; }
-            if verified_auth_probe(candidate).await == Some(false) { continue; }
-            chosen = Some(candidate);
-            break;
+    let automatic = provider == "auto" || provider == "balanced";
+    let candidates: Vec<&str> = if automatic {
+        route_candidates(&prompt, &provider, &permission)
+    } else {
+        vec![provider.as_str()]
+    };
+    let mut last_preflight_error = String::from("No compatible agent CLI available");
+    for candidate in candidates {
+        let Some(adapter) = provider_adapter(candidate) else { continue; };
+        if automatic && !provider_available(candidate, &app.state::<ProviderCooldowns>()) {
+            continue;
         }
-        let chosen = chosen.ok_or("No compatible agent CLI available: check installation, authentication and cooldown")?;
+        if let Err(message) = validate_execution(adapter, &permission) {
+            last_preflight_error = message;
+            continue;
+        }
+        if verified_auth_probe(candidate).await == Some(false) {
+            last_preflight_error = format!("{candidate} requires authentication");
+            continue;
+        }
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
-            "kind":"routing","reason":format!("Task-based routing selected {chosen}; preflight passed"),"model":"CLI default"
+            "kind":"routing","reason":format!("Executing {candidate}; preflight passed"),
+            "provider":candidate,"model":"CLI default"
         }}));
-        chosen.to_string()
-    } else { provider.clone() };
-    let adapter = provider_adapter(&selected).ok_or("Unknown execution adapter")?;
-    execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await
+        // An adapter that has started may have modified files or emitted effects.
+        // Never replay such a task automatically, even if it reports a rate limit.
+        return execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await;
+    }
+    Err(last_preflight_error)
 }
 
 
