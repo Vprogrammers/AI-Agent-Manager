@@ -653,8 +653,11 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         "copilot" => ("copilot", vec!["-p", prompt, "-s", "--no-ask-user"]),
         _ => return Err("Unsupported provider".into()),
     };
-    external_provider_preflight(provider, permission)?;
-    let executable = find_cli(binary).ok_or(format!("{provider} CLI not found in PATH"))?;
+    // Resolve the executable once; avoid repeating PATH scans in preflight.
+    if permission != "full-access" && !external_sandbox_ready(permission) {
+        return Err("PRESTART: No supported OS sandbox for this permission mode; execution blocked".into());
+    }
+    let executable = find_cli(binary).ok_or(format!("PRESTART: {provider} CLI not found in PATH"))?;
     let mut command = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
@@ -703,7 +706,15 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             stderr_task.abort();
             String::new()
         } else {
-            tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task)
+            // A successful CLI has already produced its answer. Do not hold the
+            // response for up to two seconds waiting for diagnostics to drain.
+            // Preserve the longer diagnostic window for failed executions.
+            let diagnostic_wait = if read_result.as_ref().is_ok_and(|status| status.success()) {
+                std::time::Duration::from_millis(100)
+            } else {
+                std::time::Duration::from_secs(2)
+            };
+            tokio::time::timeout(diagnostic_wait, stderr_task)
                 .await.ok().and_then(Result::ok).unwrap_or_default()
         };
         let process_ms = process_started.elapsed().as_millis();
