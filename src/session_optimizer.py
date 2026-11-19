@@ -111,7 +111,7 @@ def rotation_handoff(state, tool, prompt):
     """Preserve only bounded explicit context for follow-up prompts."""
     import re
     followup = re.search(
-        r'\\b(now|again|continue|previous|same|that|this|still|sada|opet|nastavi|prethodn|isto|jos|još|to|ovo|dalje)\\b',
+        r'\b(now|again|continue|previous|same|that|this|still|sada|opet|nastavi|prethodn|isto|jos|još|to|ovo|dalje)\b',
         prompt, re.I)
     if not followup:
         return prompt
@@ -122,7 +122,7 @@ def rotation_handoff(state, tool, prompt):
     excerpt = json.dumps({'previous_request': last.get('prompt', '')[:1000],
                           'previous_answer': last.get('answer', '')[:1500]}, ensure_ascii=False)
     return ('Fresh session to bound token usage. Recent explicit context; verify against files: '
-            + excerpt + '\\nNEW USER REQUEST:\\n' + prompt)
+            + excerpt + '\nNEW USER REQUEST:\n' + prompt)
 
 
 def load_checkpoint(path):
