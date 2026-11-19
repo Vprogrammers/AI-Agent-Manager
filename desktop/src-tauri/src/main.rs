@@ -173,7 +173,7 @@ async fn install_provider_cli(provider: String) -> Result<String, String> {
     let package = match provider.as_str() {
         "claude" => "@anthropic-ai/claude-code",
         "codex" => "@openai/codex",
-        "gemini" => "@google/gemini-cli",
+        "antigravity" => return Err("Install Antigravity CLI from https://antigravity.google/docs/cli/tutorial and retry setup.".into()),
         "opencode" => "@opencode/cli",
         "copilot" => "@github/copilot",
         _ => return Err("Unsupported provider".into()),
@@ -242,7 +242,7 @@ fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::St
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
         "claude" => ("claude", &["auth", "login"]),
         "codex" => ("codex", &["login"]),
-        "gemini" => ("gemini", &[]),
+        "antigravity" => ("antigravity", &[]),
         "opencode" => ("opencode", &["auth", "login"]),
         "copilot" => ("copilot", &["login"]),
         _ => return Err("Unsupported provider".into()),
@@ -312,7 +312,7 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
     for (id, binary, args) in [
         ("claude", "claude", vec!["auth", "status"]),
         ("codex", "codex", vec!["login", "status"]),
-        ("gemini", "gemini", vec!["--version"]),
+        ("antigravity", "antigravity", vec!["--version"]),
         ("opencode", "opencode", vec!["auth", "list"]),
         ("copilot", "copilot", vec!["--version"]),
     ] {
@@ -342,7 +342,7 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
         ).await;
         // Only Claude and Codex expose the verified auth-status probes used here.
         // Other CLI exit codes are not evidence of an authenticated account.
-        let (authenticated, auth_status, detail) = if ["gemini", "opencode", "copilot"].contains(&id) {
+        let (authenticated, auth_status, detail) = if ["antigravity", "opencode", "copilot"].contains(&id) {
             match status {
                 Ok(Ok(exit)) if exit.success() => (false, "unknown", "CLI detected; authentication must be verified in the provider"),
                 Ok(Ok(_)) => (false, "unknown", "CLI detected; login status not independently verified"),
@@ -387,7 +387,7 @@ struct ProviderAdapter {
 const PROVIDER_ADAPTERS: [ProviderAdapter; 5] = [
     ProviderAdapter { id: "claude", transport: ExecutionAdapter::Engine },
     ProviderAdapter { id: "codex", transport: ExecutionAdapter::Engine },
-    ProviderAdapter { id: "gemini", transport: ExecutionAdapter::SandboxedCli },
+    ProviderAdapter { id: "antigravity", transport: ExecutionAdapter::SandboxedCli },
     ProviderAdapter { id: "opencode", transport: ExecutionAdapter::SandboxedCli },
     ProviderAdapter { id: "copilot", transport: ExecutionAdapter::SandboxedCli },
 ];
@@ -427,7 +427,7 @@ mod adapter_contract_tests {
     fn engine_and_sandbox_transports_are_explicit() {
         assert_eq!(provider_adapter("claude").unwrap().transport, ExecutionAdapter::Engine);
         assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::Engine);
-        for id in ["gemini", "opencode", "copilot"] {
+        for id in ["antigravity", "opencode", "copilot"] {
             assert_eq!(provider_adapter(id).unwrap().transport, ExecutionAdapter::SandboxedCli);
         }
         assert!(provider_adapter("unknown").is_none());
@@ -552,7 +552,7 @@ where
 
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
-        "gemini" => ("gemini", vec!["-p", prompt, "--output-format", "json"]),
+        "antigravity" => ("antigravity", vec!["-p", prompt, "--output-format", "json"]),
         "opencode" => ("opencode", vec!["run", prompt]),
         "copilot" => ("copilot", vec!["-p", prompt, "-s", "--no-ask-user"]),
         _ => return Err("Unsupported provider".into()),
@@ -598,7 +598,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         }
         if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
         let text = String::from_utf8_lossy(&output.stdout);
-        let answer = if provider == "gemini" {
+        let answer = if false {
             serde_json::from_str::<serde_json::Value>(&text).ok()
                 .and_then(|v| v.get("response").and_then(|r| r.as_str()).map(str::to_owned))
                 .unwrap_or_else(|| text.to_string())
@@ -615,15 +615,15 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
 fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static str> {
     let p = prompt.to_ascii_lowercase();
     let ordered: Vec<&str> = if p.contains("review") || p.contains("audit") || p.contains("security") || p.contains("bug") {
-        vec!["codex", "claude", "gemini", "opencode", "copilot"]
+        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
     } else if p.contains("architecture") || p.contains("design") || p.contains("refactor") || p.contains("plan") {
-        vec!["claude", "gemini", "codex", "opencode", "copilot"]
+        vec!["claude", "antigravity", "codex", "opencode", "copilot"]
     } else if p.contains("github") || p.contains("pull request") || p.contains("issue") {
-        vec!["copilot", "codex", "claude", "gemini", "opencode"]
+        vec!["copilot", "codex", "claude", "antigravity", "opencode"]
     } else if p.contains("explain") || p.contains("document") || p.contains("summar") {
-        vec!["gemini", "claude", "codex", "opencode", "copilot"]
+        vec!["antigravity", "claude", "codex", "opencode", "copilot"]
     } else {
-        vec!["codex", "copilot", "claude", "opencode", "gemini"]
+        vec!["codex", "copilot", "claude", "opencode", "antigravity"]
     };
     let mut candidates: Vec<&str> = ordered.into_iter().filter(|id|
         permission == "workspace-write" || ["claude", "codex"].contains(id)
@@ -631,7 +631,7 @@ fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static 
     if mode == "balanced" {
         // Balanced prefers general-purpose agents, while respecting task constraints.
         candidates.sort_by_key(|id| match *id {
-            "claude" => 0, "codex" => 1, "gemini" => 2, "opencode" => 3, _ => 4
+            "claude" => 0, "codex" => 1, "antigravity" => 2, "opencode" => 3, _ => 4
         });
     }
     candidates
@@ -644,7 +644,7 @@ mod routing_tests {
     #[test]
     fn task_fit_prefers_expected_provider() {
         assert_eq!(route_candidates("Review security bug", "auto", "workspace-write")[0], "codex");
-        assert_eq!(route_candidates("Explain this module", "auto", "workspace-write")[0], "gemini");
+        assert_eq!(route_candidates("Explain this module", "auto", "workspace-write")[0], "antigravity");
         assert_eq!(route_candidates("Create GitHub pull request", "auto", "workspace-write")[0], "copilot");
     }
 
@@ -677,9 +677,9 @@ mod routing_tests {
     fn cooldown_excludes_provider_until_expiry() {
         use super::{ProviderCooldowns, provider_available, set_provider_cooldown};
         let cooldowns = ProviderCooldowns::default();
-        assert!(provider_available("gemini", &cooldowns));
-        set_provider_cooldown("gemini", &cooldowns);
-        assert!(!provider_available("gemini", &cooldowns));
+        assert!(provider_available("antigravity", &cooldowns));
+        set_provider_cooldown("antigravity", &cooldowns);
+        assert!(!provider_available("antigravity", &cooldowns));
         assert!(provider_available("codex", &cooldowns));
     }
 
@@ -887,7 +887,7 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
 
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
-    if !["claude", "codex", "gemini", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
+    if !["claude", "codex", "antigravity", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
     if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
     if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
     let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
