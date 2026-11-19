@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
-import { analyzePrompt, recommendedStrategy, emptyFeedback, type Strategy, type Feedback } from './promptOptimizer';
+import { analyzePrompt, recommendedStrategy, emptyFeedback, promptDiff, validateSuggestion, estimateTokens, type Agent, type Strategy, type Feedback } from './promptOptimizer';
 
 type Provider = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'copilot';
 type RoutingMode = Provider | 'auto' | 'balanced';
@@ -171,11 +171,17 @@ function App() {
   const [pendingPrompt, setPendingPrompt] = React.useState<string | null>(null);
   const [suggestedPrompt, setSuggestedPrompt] = React.useState('');
   const [strategy, setStrategy] = React.useState<Strategy>('balanced');
+  const [maxExtraTokens,setMaxExtraTokens] = React.useState(120);
+  const [optimizerMetrics,setOptimizerMetrics] = React.useState<{runs:number;addedEstimate:number;reportedInput:number;reportedOutput:number}>({runs:0,addedEstimate:0,reportedInput:0,reportedOutput:0});
   const [feedback, setFeedback] = React.useState<Feedback>(()=>{try { const saved=JSON.parse(localStorage.getItem('aam.optimizer.feedback.v1')||'null'); return saved&&saved.strategy? saved as Feedback:emptyFeedback(); } catch{return emptyFeedback();}});
   const [relevantPaths, setRelevantPaths] = React.useState<string[]>([]);
   const [optimizerInstructions, setOptimizerInstructions] = React.useState<string[]>([]);
   const [suggestionRevision, setSuggestionRevision] = React.useState(0);
-  const optimizerAnalysis = React.useMemo(()=>analyzePrompt(pendingPrompt||'',relevantPaths,optimizerInstructions,strategy,messages.length>0),[pendingPrompt,relevantPaths,optimizerInstructions,strategy,messages.length]);
+  const previousRequest = React.useMemo(()=>[...messages].reverse().find(m=>m.role==='user')?.text||'', [messages]);
+  const agentType:Agent = provider==='claude'?'claude':provider==='codex'?'codex':'other';
+  const optimizerAnalysis = React.useMemo(()=>analyzePrompt(pendingPrompt||'',relevantPaths,optimizerInstructions,strategy,messages.length>0,agentType,previousRequest,maxExtraTokens),[pendingPrompt,relevantPaths,optimizerInstructions,strategy,messages.length,agentType,previousRequest,maxExtraTokens]);
+  const optimizerDiff = React.useMemo(()=>promptDiff(pendingPrompt||'',suggestedPrompt),[pendingPrompt,suggestedPrompt]);
+  const optimizerSafety = React.useMemo(()=>validateSuggestion(pendingPrompt||'',suggestedPrompt),[pendingPrompt,suggestedPrompt]);
   const trackOptimizer = (action:'approved'|'edited'|'regenerated'|'rejected') => {
     setFeedback(prev=>{const next={...prev,[action]:prev[action]+1,strategy:{...prev.strategy,[strategy]:prev.strategy[strategy]+1}};localStorage.setItem('aam.optimizer.feedback.v1',JSON.stringify(next));return next;});
   };
@@ -277,7 +283,7 @@ function App() {
     if(original==='/clear'||original==='/new'){void clearSession();return;}
     const chosen=recommendedStrategy(feedback);
     setStrategy(chosen);setPendingPrompt(original);setSuggestionRevision(0);
-    setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0).suggestion);
+    setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion);
   };
   const regenerateSuggestion = () => {
     if(!pendingPrompt)return;
@@ -292,6 +298,7 @@ function App() {
     const requestedProvider = provider;
     const requestRoot = root;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
+    if(pendingPrompt) setOptimizerMetrics(prev=>({...prev,runs:prev.runs+1,addedEstimate:prev.addedEstimate+estimateTokens(text)-estimateTokens(pendingPrompt)}));
     setPrompt(''); setPendingPrompt(null); setSuggestedPrompt(''); setSuggestionRevision(0); setUseOptimized(false); setOptimizerOpen(false); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
     setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider === 'codex' ? 'codex' : 'claude');
     setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
@@ -452,15 +459,18 @@ function App() {
 {optimizerAnalysis.missing.length>0&&<p className="hint">Missing details: {optimizerAnalysis.missing.join(' ')}</p>}
 {relevantPaths.length>0&&<p className="hint">Candidate files: {relevantPaths.join(', ')}</p>}
 <div style={{display:'flex',gap:8,alignItems:'center'}}><label htmlFor="prompt-strategy">Style</label><select id="prompt-strategy" value={strategy} onChange={e=>setStrategy(e.target.value as Strategy)}><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="detailed">Detailed</option></select></div>
+<div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><label htmlFor="optimizer-budget">Max added tokens (estimate)</label><input id="optimizer-budget" type="number" min="0" max="500" value={maxExtraTokens} onChange={e=>setMaxExtraTokens(Math.max(0,Math.min(500,Number(e.target.value)||0)))} style={{width:70}}/></div>
+<details><summary>Review changes</summary><p className="hint">Added lines: {optimizerDiff.added.length} · Removed lines: {optimizerDiff.removed.length}</p><pre style={{whiteSpace:'pre-wrap',maxHeight:130,overflow:'auto'}}>{optimizerDiff.added.map(x=>'+ '+x).join('\n')||'No additions'}</pre>{optimizerDiff.removed.length>0&&<pre style={{whiteSpace:'pre-wrap'}}>{optimizerDiff.removed.map(x=>'- '+x).join('\n')}</pre>}</details>
+{!optimizerSafety.safe&&<p role="alert">Safety check: {optimizerSafety.issues.join(' ')}</p>}
 <textarea aria-label="Edit suggested prompt" value={suggestedPrompt} onChange={e=>setSuggestedPrompt(e.target.value)} rows={9} style={{width:'100%'}}/>
-<p className="hint">Original ~{Math.ceil(pendingPrompt.length/4)} tokens · proposed ~{Math.ceil(suggestedPrompt.length/4)} tokens (character-based estimates, not billing). No quality improvement is claimed.</p>
+<p className="hint">Original ~{estimateTokens(pendingPrompt)} tokens · proposed ~{estimateTokens(suggestedPrompt)} tokens (character-based estimates, not billing). No quality improvement is claimed.</p>
 <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-<button disabled={busy||!suggestedPrompt.trim()} onClick={()=>{trackOptimizer(suggestedPrompt===optimizerAnalysis.suggestion?'approved':'edited');void send(suggestedPrompt);}}>Approve & send</button>
+<button disabled={busy||!suggestedPrompt.trim()||!optimizerSafety.safe} onClick={()=>{trackOptimizer(suggestedPrompt===optimizerAnalysis.suggestion?'approved':'edited');void send(suggestedPrompt);}}>Approve & send</button>
 <button disabled={busy} onClick={regenerateSuggestion}>Try another suggestion</button>
 <button disabled={busy} onClick={()=>{trackOptimizer('edited');setPrompt(suggestedPrompt);setPendingPrompt(null);}}>Edit in chat</button>
 <button disabled={busy} onClick={()=>{trackOptimizer('rejected');void send(pendingPrompt);}}>Reject & send original</button>
 <button disabled={busy} onClick={()=>{setPendingPrompt(null);setSuggestedPrompt('');}}>Cancel</button>
-</div><p className="hint">Local feedback counts: {feedback.approved} accepted · {feedback.edited} edited · {feedback.rejected} rejected. No prompt text stored in feedback.</p>
+</div><p className="hint">Local usage: {optimizerMetrics.runs} submitted · ~{optimizerMetrics.addedEstimate} net added tokens (estimate, not savings). Feedback: {feedback.approved} accepted · {feedback.edited} edited · {feedback.rejected} rejected. No prompt text stored in feedback.</p>
 </div>}<textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Gemini" : liveProvider === "auto" || liveProvider === "balanced" ? "agent" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Gemini" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
   </div>;
 }
