@@ -168,6 +168,7 @@ function App() {
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
+  const [messages, setMessages] = React.useState<Message[]>([]);
   const [pendingPrompt, setPendingPrompt] = React.useState<string | null>(null);
   const [suggestedPrompt, setSuggestedPrompt] = React.useState('');
   const [strategy, setStrategy] = React.useState<Strategy>('balanced');
@@ -176,7 +177,7 @@ function App() {
   const [feedback, setFeedback] = React.useState<Feedback>(()=>{try { const saved=JSON.parse(localStorage.getItem('aam.optimizer.feedback.v1')||'null'); return saved&&saved.strategy? saved as Feedback:emptyFeedback(); } catch{return emptyFeedback();}});
   const [relevantPaths, setRelevantPaths] = React.useState<string[]>([]);
   const [optimizerInstructions, setOptimizerInstructions] = React.useState<string[]>([]);
-  const [suggestionRevision, setSuggestionRevision] = React.useState(0);
+
   const previousRequest = React.useMemo(()=>[...messages].reverse().find(m=>m.role==='user')?.text||'', [messages]);
   const agentType:Agent = provider==='claude'?'claude':provider==='codex'?'codex':'other';
   const optimizerAnalysis = React.useMemo(()=>analyzePrompt(pendingPrompt||'',relevantPaths,optimizerInstructions,strategy,messages.length>0,agentType,previousRequest,maxExtraTokens),[pendingPrompt,relevantPaths,optimizerInstructions,strategy,messages.length,agentType,previousRequest,maxExtraTokens]);
@@ -192,7 +193,6 @@ function App() {
   },[pendingPrompt,root]);
   React.useEffect(()=>{if(pendingPrompt)setSuggestedPrompt(optimizerAnalysis.suggestion);},[optimizerAnalysis,pendingPrompt]);
   const [permission, setPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
-  const [messages, setMessages] = React.useState<Message[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
@@ -282,13 +282,13 @@ function App() {
     if(!original||busy||!root.trim())return;
     if(original==='/clear'||original==='/new'){void clearSession();return;}
     const chosen=recommendedStrategy(feedback);
-    setStrategy(chosen);setPendingPrompt(original);setSuggestionRevision(0);
+    setStrategy(chosen);setPendingPrompt(original);
     setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion);
   };
   const regenerateSuggestion = () => {
     if(!pendingPrompt)return;
     const next:Strategy=strategy==='balanced'?'concise':strategy==='concise'?'detailed':'balanced';
-    trackOptimizer('regenerated');setStrategy(next);setSuggestionRevision(n=>n+1);
+    trackOptimizer('regenerated');setStrategy(next);
   };
   const send = async (approvedText?: string) => {
     const text = (approvedText ?? prompt).trim();
