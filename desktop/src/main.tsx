@@ -5,8 +5,9 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
+import { analyzePrompt, recommendedStrategy, emptyFeedback, promptDiff, validateSuggestion, estimateTokens, type Agent, type Strategy, type Feedback } from './promptOptimizer';
 
-type Provider = 'claude' | 'codex';
+type Provider = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'copilot';
 type RoutingMode = Provider | 'auto' | 'balanced';
 
 type AiConfigItem = { name:string; path:string; kind:string; claude:'supported'|'unsupported'|'unknown'; codex:'supported'|'unsupported'|'unknown'; claudeReason:string; codexReason:string };
@@ -17,7 +18,7 @@ function AiStatus({status,reason}: {status:AiConfigItem['claude'];reason:string}
 type ArchitectProposal = { path:string; action:string; reason:string; before:string|null; after:string };
 type ArchitectPlan = { stack:string[]; proposals:ArchitectProposal[] };
 type GithubRepo = { nameWithOwner: string; isPrivate: boolean; description: string | null };
-type Message = { role: 'user' | 'assistant'; text: string; provider: Provider };
+type Message = { role: 'user' | 'assistant'; text: string; provider: Provider; usage?: TokenUsage; model?: string; duration?: number };
 const TOKEN_LABELS: Record<string,string> = {
   input_tokens: 'Input',
   cached_input_tokens: 'Cached input',
@@ -25,6 +26,7 @@ const TOKEN_LABELS: Record<string,string> = {
   cache_creation_input_tokens: 'Cache creation',
   output_tokens: 'Output',
   reasoning_output_tokens: 'Reasoning output',
+  agent_turns: 'Agent turns (Claude)',
 };
 type TokenUsage = Record<string, number>;
 type UsageRecord = { provider: Provider; model: string; duration: number; usage: TokenUsage; time: string };
@@ -34,7 +36,7 @@ function loadUsage(path: string): UsageRecord[] {
   try {
     const value: unknown = JSON.parse(localStorage.getItem(USAGE_PREFIX + path) || '[]');
     return Array.isArray(value) ? value.filter((v): v is UsageRecord =>
-      !!v && (v.provider === 'claude' || v.provider === 'codex') &&
+      !!v && (['claude', 'codex', 'antigravity', 'opencode', 'copilot'].includes(v.provider)) &&
       typeof v.duration === 'number' && !!v.usage && typeof v.usage === 'object'
     ).slice(-500) : [];
   } catch { return []; }
@@ -65,13 +67,74 @@ function cacheRatio(usage: TokenUsage): string | null {
 }
 function TokenTable({usage}: {usage:TokenUsage}) {
   const rows = usageRows(usage);
-  return rows.length ? <div className="token-stats">{rows.map(([label,value],i)=><div className="token-row" key={i}><span>{label}</span><span className="token-value">{numberFormat(value)}</span></div>)}{cacheRatio(usage)&&<div className="token-row"><span>Cached share</span><span className="token-value">{cacheRatio(usage)}</span></div>}</div> : <p className="token-empty">Not reported</p>;
+  if (!rows.length) return <p className="token-empty">Not reported by provider</p>;
+  const input = usage.input_tokens;
+  const cached = usage.cached_input_tokens ?? usage.cache_read_input_tokens;
+  // Codex input includes cached tokens; Claude reports cache reads/creation separately.
+  const isInclusive = typeof input === 'number' && typeof cached === 'number' && input >= cached;
+  const newInput = typeof input === 'number' ? (isInclusive ? input - cached : input) : null;
+  const processedInput = typeof input === 'number'
+    ? input + (isInclusive ? 0 : (cached ?? 0)) + (usage.cache_creation_input_tokens ?? 0)
+    : null;
+  const processed = processedInput === null ? null : processedInput + (usage.output_tokens ?? 0);
+  const row = (label:string, value:number|string) => <div className="token-row" key={label}><span>{label}</span><strong className="token-value">{typeof value === 'number' ? numberFormat(value) : value}</strong></div>;
+  return <div className="token-stats">
+    {processed !== null && row('Total processed (reported)', processed)}
+    {newInput !== null && row('New input', newInput)}
+    {typeof cached === 'number' && row('Cached input', cached)}
+    {typeof usage.cache_creation_input_tokens === 'number' && row('Cache creation', usage.cache_creation_input_tokens)}
+    {typeof usage.output_tokens === 'number' && row('Output', usage.output_tokens)}
+    {row('Internal model calls', 'Not exposed by CLI')}
+    {typeof usage.agent_turns === 'number' && row('Claude agent turns', usage.agent_turns)}
+    <details><summary>Raw provider counters</summary>{rows.map(([label,value],i)=><div className="token-row" key={i}><span>{label}</span><span className="token-value">{numberFormat(value)}</span></div>)}</details>
+    <small>Provider counters are not directly comparable across Claude and Codex. Total processed is an estimate from reported counters, not billing or quota usage. Claude agent turns are measured separately from model calls; Codex JSON does not expose per-model-call events.</small>
+  </div>;
 }
 
 const WORKSPACES_KEY = 'aam.desktop.workspaces.v1';
 function savedWorkspaces(): string[] {
   try { const value: unknown = JSON.parse(localStorage.getItem(WORKSPACES_KEY) || '[]'); return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string').slice(0, 8) : []; }
   catch { return []; }
+}
+function previewPrompt(text: string): {optimized:string; removed:number} {
+  const seen = new Set<string>();
+  let fenced = false;
+  let removed = 0;
+  const lines: string[] = [];
+  for (const line of text.split('\n')) {
+    const key = line.trim();
+    if (key.startsWith('```') || key.startsWith('~~~')) { fenced = !fenced; lines.push(line); continue; }
+    if (!fenced && key.length >= 24 && seen.has(key)) { removed++; continue; }
+    lines.push(line);
+    if (!fenced && key) seen.add(key);
+  }
+  return {optimized:lines.join('\n'),removed};
+}
+function expandPrompt(text: string): {draft:string; questions:string[]} {
+  const request = text.trim();
+  if (!request) return {draft:'',questions:[]};
+  const questions: string[] = [];
+  if (!/\b(android|ios|macos|web|backend|frontend|kmp|kotlin|swift|rust|python|react|typescript|platform|repo|project)\b/i.test(request))
+    questions.push('Which project, platform, or component is in scope?');
+  if (!/\b(test|verify|acceptance|expected|result|pass|prover|testir|oček|prihvat)\b/i.test(request))
+    questions.push('What observable result or test will confirm success?');
+  if (!/\b(only|except|without|must not|do not|nemoj|samo|bez|ne menjaj|ne mijenjaj)\b/i.test(request))
+    questions.push('Are there files or behaviors that must remain unchanged?');
+  const draft = [
+    'Task (original request; preserve its meaning):',
+    request,
+    '',
+    'Execution instructions:',
+    '- Inspect the existing project structure and relevant code before editing.',
+    '- Reuse existing architecture, conventions, and dependencies.',
+    '- Do not invent requirements or silently choose among ambiguous alternatives.',
+    '- If a missing detail blocks safe implementation, ask for clarification.',
+    '- Make the smallest change that meets the confirmed request.',
+    '- Run relevant available checks and report exactly what was executed.',
+    '- Report changed files, results, and unresolved issues.',
+    ...(questions.length ? ['', 'Open questions (do not assume answers):', ...questions.map(q=>'- '+q)] : [])
+  ].join('\n');
+  return {draft,questions};
 }
 function App() {
   const [root, setRoot] = React.useState('');
@@ -105,8 +168,31 @@ function App() {
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
-  const [permission, setPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
   const [messages, setMessages] = React.useState<Message[]>([]);
+  const [pendingPrompt, setPendingPrompt] = React.useState<string | null>(null);
+  const [suggestedPrompt, setSuggestedPrompt] = React.useState('');
+  const [strategy, setStrategy] = React.useState<Strategy>('balanced');
+  const [maxExtraTokens,setMaxExtraTokens] = React.useState(120);
+  const [optimizerMetrics,setOptimizerMetrics] = React.useState<{runs:number;addedEstimate:number;reportedInput:number;reportedOutput:number}>({runs:0,addedEstimate:0,reportedInput:0,reportedOutput:0});
+  const [feedback, setFeedback] = React.useState<Feedback>(()=>{try { const saved=JSON.parse(localStorage.getItem('aam.optimizer.feedback.v1')||'null'); return saved&&saved.strategy? saved as Feedback:emptyFeedback(); } catch{return emptyFeedback();}});
+  const [relevantPaths, setRelevantPaths] = React.useState<string[]>([]);
+  const [optimizerInstructions, setOptimizerInstructions] = React.useState<string[]>([]);
+
+  const previousRequest = React.useMemo(()=>[...messages].reverse().find(m=>m.role==='user')?.text||'', [messages]);
+  const agentType:Agent = provider==='claude'?'claude':provider==='codex'?'codex':'other';
+  const optimizerAnalysis = React.useMemo(()=>analyzePrompt(pendingPrompt||'',relevantPaths,optimizerInstructions,strategy,messages.length>0,agentType,previousRequest,maxExtraTokens),[pendingPrompt,relevantPaths,optimizerInstructions,strategy,messages.length,agentType,previousRequest,maxExtraTokens]);
+  const optimizerDiff = React.useMemo(()=>promptDiff(pendingPrompt||'',suggestedPrompt),[pendingPrompt,suggestedPrompt]);
+  const optimizerSafety = React.useMemo(()=>validateSuggestion(pendingPrompt||'',suggestedPrompt),[pendingPrompt,suggestedPrompt]);
+  const trackOptimizer = (action:'approved'|'edited'|'regenerated'|'rejected') => {
+    setFeedback(prev=>{const next={...prev,[action]:prev[action]+1,strategy:{...prev.strategy,[strategy]:prev.strategy[strategy]+1}};localStorage.setItem('aam.optimizer.feedback.v1',JSON.stringify(next));return next;});
+  };
+  React.useEffect(()=>{if(!pendingPrompt||!root){setRelevantPaths([]);setOptimizerInstructions([]);return;}let active=true;
+    void invoke<string[]>('relevant_prompt_files',{root,prompt:pendingPrompt}).then(paths=>{if(active)setRelevantPaths(paths);}).catch(()=>{if(active)setRelevantPaths([]);});
+    void invoke<AiConfigItem[]>('project_ai_config',{root}).then(config=>{if(active)setOptimizerInstructions(config.map(x=>x.path).filter(Boolean).slice(0,4));}).catch(()=>{if(active)setOptimizerInstructions([]);});
+    return ()=>{active=false;};
+  },[pendingPrompt,root]);
+  React.useEffect(()=>{if(pendingPrompt)setSuggestedPrompt(optimizerAnalysis.suggestion);},[optimizerAnalysis,pendingPrompt]);
+  const [permission, setPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
   const [busy, setBusy] = React.useState(false);
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
@@ -122,7 +208,7 @@ function App() {
   const [limitNotice, setLimitNotice] = React.useState('');
   const [activity, setActivity] = React.useState('');
   const [liveText, setLiveText] = React.useState('');
-  const [liveProvider, setLiveProvider] = React.useState<'claude'|'codex'>('claude');
+  const [liveProvider, setLiveProvider] = React.useState<Provider>('claude');
   const requestSeq = React.useRef(0);
   const messagesEnd = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { messagesEnd.current?.scrollIntoView({ block: 'end', behavior: 'smooth' }); }, [messages, liveText]);
@@ -181,14 +267,39 @@ function App() {
     const agents = [...log.matchAll(/\[aam\] (?:Agent ready:|Automatically switching to)\s*(claude|codex)/gi)];
     if (agents.length) setLastProvider(agents[agents.length - 1][1]);
   };
-  const send = async () => {
-    const text = prompt.trim();
+  const clearSession = async () => {
+    if (!root.trim() || busy) return;
+    if (!window.confirm('Start a fresh Claude/Codex session for this workspace? Saved conversation references and handoff context will be cleared. Usage history and files will remain.')) return;
+    try {
+      await invoke('clear_agent_session', {root});
+      setMessages([]); setPrompt(''); setLastUsage({}); setUsage('Not reported');
+      setError(''); setActivity(''); setLiveText(''); setLimitNotice('');
+      setPendingSwitch(false); setFailedPrompt('');
+    } catch (e) { setError('Cannot clear session: ' + String(e)); }
+  };
+  const submitPrompt = () => {
+    const original=prompt.trim();
+    if(!original||busy||!root.trim())return;
+    if(original==='/clear'||original==='/new'){void clearSession();return;}
+    const chosen=recommendedStrategy(feedback);
+    setStrategy(chosen);setPendingPrompt(original);
+    setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion);
+  };
+  const regenerateSuggestion = () => {
+    if(!pendingPrompt)return;
+    const next:Strategy=strategy==='balanced'?'concise':strategy==='concise'?'detailed':'balanced';
+    trackOptimizer('regenerated');setStrategy(next);
+  };
+  const send = async (approvedText?: string) => {
+    const text = (approvedText ?? prompt).trim();
+    if (text === '/clear' || text === '/new') { await clearSession(); return; }
     if (!text || !root.trim() || busy) return;
     const id = String(++requestSeq.current);
     const requestedProvider = provider;
     const requestRoot = root;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
-    setPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
+    if(pendingPrompt) setOptimizerMetrics(prev=>({...prev,runs:prev.runs+1,addedEstimate:prev.addedEstimate+estimateTokens(text)-estimateTokens(pendingPrompt)}));
+    setPrompt(''); setPendingPrompt(null); setSuggestedPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
     setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider === 'codex' ? 'codex' : 'claude');
     setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
     setMessages(m => [...m, { role: 'user', text, provider: requestedProvider === 'codex' ? 'codex' : 'claude' }]);
@@ -206,8 +317,9 @@ function App() {
         const kind = data.kind;
         if (kind === 'routing') {
           setActivity('Auto: '+String(data.reason || 'Routing')+' · '+String(data.model || 'CLI default'));
-        } else if (kind === 'provider' && (data.provider === 'claude' || data.provider === 'codex')) {
-          setLastProvider(data.provider); setLiveProvider(data.provider); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(data.provider); setActivity('Running '+data.provider);
+        } else if (kind === 'provider' && (['claude', 'codex', 'antigravity', 'opencode', 'copilot'].includes(String(data.provider)))) {
+          const selectedProvider = String(data.provider) as Provider;
+          setLastProvider(selectedProvider); setLiveProvider(selectedProvider); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(selectedProvider); setActivity('Running '+selectedProvider);
         } else if (kind === 'activity') {
           const ev = data.event as Record<string,unknown> | undefined;
           if (ev) {
@@ -243,14 +355,14 @@ function App() {
           }
         } else if (kind === 'result') {
           completed = true;
-          const actual = data.provider === 'codex' ? 'codex' : 'claude';
+          const actual = (['claude', 'codex', 'antigravity', 'opencode', 'copilot'].includes(String(data.provider)) ? data.provider : 'claude') as Provider;
           setLastProvider(actual); if (requestedProvider !== 'auto' && requestedProvider !== 'balanced') setProvider(actual);
           const counts = data.usage as Record<string,unknown> | undefined;
           const parsed = numericUsage(counts);
           setLastUsage(parsed); setUsage(Object.keys(parsed).length ? 'Reported' : 'Not reported');
           const record: UsageRecord = {provider:actual,model:String(data.model || 'Unknown'),duration:Math.round((Date.now()-requestStarted)/1000),usage:parsed,time:new Date().toISOString()};
           setUsageHistory(previous => { const next=[...previous,record].slice(-500); try { localStorage.setItem(USAGE_PREFIX+requestRoot,JSON.stringify(next)); } catch {} return next; });
-          setMessages(m => [...m, {role:'assistant', text:String(data.answer || streamText), provider:actual}]);
+          setMessages(m => [...m, {role:'assistant', text:String(data.answer || streamText), provider:actual, usage:parsed, model:record.model, duration:record.duration}]);
           setLiveText('');
           setActivity('Completed · '+String(data.model || actual));
         } else if (kind === 'error') {
@@ -274,7 +386,7 @@ function App() {
     finally { unlisten?.(); setBusy(false); setStopping(false); setStartedAt(null); }
   };
   return <div className="app">
-    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><AgentSetupWizard/><label>Workspace</label><button className="open-folder" disabled={busy} onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" disabled={busy} onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" disabled={busy} placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} disabled={busy} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">{provider==='codex'?'Codex read-only and workspace-write use CLI filesystem sandboxing. Full access bypasses sandbox and approvals.':'Claude read-only restricts allowed tool names, not an OS sandbox. Workspace write uses acceptEdits (other operations may still be allowed). Full access skips permissions.'}</p><label>Agent routing</label><div className="agents"><button disabled={busy} className={provider==='auto'?'active codex':''} onClick={()=>setProvider('auto')}>Auto</button><button disabled={busy} className={provider==='balanced'?'active codex':''} onClick={()=>setProvider('balanced')}>Balanced</button><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button></div><p className="hint">Auto uses local task rules and existing sessions to reduce handoffs; Balanced prioritizes session reuse. No extra AI routing call. Manual Claude/Codex remains available. Provider limits never justify replaying uncertain edits.</p><div className="ai-config-panel"><div className="usage-heading"><strong>Setup & Diagnostics</strong><button onClick={()=>setDiagnosticsOpen(v=>!v)}>{diagnosticsOpen?'Hide':'Show'}</button></div>{diagnosticsOpen&&<><button onClick={()=>void refreshDiagnostics()}>Refresh checks</button>{diagnostics.map(d=><div className="diagnostic-item" key={d.name}><strong>{d.name}</strong><span className={'ai-status '+(d.status==='ready'?'supported':d.status==='missing'?'unsupported':'unknown')}>{d.status}</span><p>{d.detail}</p></div>)}<small>CLI detection does not verify authentication. Sign in using the provider CLI before your first request.</small></>}</div><div className="ai-config-panel">
+    <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><AgentSetupWizard/><label>Workspace</label><button className="open-folder" disabled={busy} onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" disabled={busy} onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" disabled={busy} placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} disabled={busy} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">{provider==='codex'?'Codex read-only and workspace-write use CLI filesystem sandboxing. Full access bypasses sandbox and approvals.':'Claude read-only restricts allowed tool names, not an OS sandbox. Workspace write uses acceptEdits (other operations may still be allowed). Full access skips permissions.'}</p><button disabled={busy || !root.trim()} onClick={()=>void clearSession()}>Clear session</button><p className="hint">Or type /clear. Resets Claude/Codex conversation context, not provider login or usage history.</p><label>Agent routing</label><div className="agents"><button disabled={busy} className={provider==='auto'?'active codex':''} onClick={()=>setProvider('auto')}>Auto</button><button disabled={busy} className={provider==='balanced'?'active codex':''} onClick={()=>setProvider('balanced')}>Balanced</button><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button><button disabled={busy} className={provider==='antigravity'?'active codex':''} onClick={()=>setProvider('antigravity')}>Gemini</button><button disabled={busy} className={provider==='opencode'?'active codex':''} onClick={()=>setProvider('opencode')}>OpenCode</button><button disabled={busy} className={provider==='copilot'?'active codex':''} onClick={()=>setProvider('copilot')}>Copilot</button></div><p className="hint">Auto uses local task rules and existing sessions to reduce handoffs; Balanced prioritizes session reuse. No extra AI routing call. Manual Claude/Codex/Gemini/OpenCode/Copilot selection is available. Auto/Balanced currently route only Claude/Codex. Provider limits never justify replaying uncertain edits.</p><div className="ai-config-panel"><div className="usage-heading"><strong>Setup & Diagnostics</strong><button onClick={()=>setDiagnosticsOpen(v=>!v)}>{diagnosticsOpen?'Hide':'Show'}</button></div>{diagnosticsOpen&&<><button onClick={()=>void refreshDiagnostics()}>Refresh checks</button>{diagnostics.map(d=><div className="diagnostic-item" key={d.name}><strong>{d.name}</strong><span className={'ai-status '+(d.status==='ready'?'supported':d.status==='missing'?'unsupported':'unknown')}>{d.status}</span><p>{d.detail}</p></div>)}<small>CLI detection does not verify authentication. Sign in using the provider CLI before your first request.</small></>}</div><div className="ai-config-panel">
       <div className="usage-heading"><strong>Project AI configuration</strong><button onClick={()=>setAiConfigOpen(v=>!v)} aria-expanded={aiConfigOpen}>{aiConfigOpen?'Hide':'Show'}</button></div>
       {aiConfigOpen&&<>
         <button className="ai-config-refresh" disabled={!root.trim()||aiConfigLoading} onClick={()=>void scanAiConfig(root)}>{aiConfigLoading?'Scanning…':'Refresh scan'}</button>
@@ -341,7 +453,25 @@ function App() {
         <button className="clear-usage" disabled={busy||usageHistory.length===0} onClick={()=>{if(window.confirm('Clear desktop usage history for this workspace?')){localStorage.removeItem(USAGE_PREFIX+root);setUsageHistory([]);}}}>Clear desktop history</button>
       </>}
     </div></aside>
-    <main>{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={m.role}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small><pre>{m.text}</pre></article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><pre>{liveText}<span className="stream-cursor">▍</span></pre></article>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}><textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void send();}}} placeholder="Ask Claude or Codex…"/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={()=>void send()}>{busy?'Running…':'Send →'}</button></footer></main>
+    <main>{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={`${m.role} ${m.role === "assistant" ? `provider-${m.provider}` : ""}`}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small><pre>{m.text}</pre>{m.role==='assistant'&&m.usage&&<details className="prompt-usage"><summary>Tokens for this prompt · {m.model} · {m.duration}s</summary><TokenTable usage={m.usage}/><small>Provider-reported turn usage, including repeated cached context. Uncached input is input minus cached input, not just your typed text. Raw numeric diagnostics: .git/ai-agent-manager/usage-diagnostics.jsonl.</small></details>}</article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><pre>{liveText}<span className="stream-cursor">▍</span></pre></article>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}>{pendingPrompt!==null&&<div className="prompt-suggestion" role="region" aria-label="Suggested prompt" style={{padding:12,border:'1px solid var(--border, #777)',borderRadius:8,margin:8}}>
+<strong>Suggested improved prompt</strong>
+<p className="hint">Local scripts only · no AI calls · {optimizerAnalysis.kind} · clarity heuristic {optimizerAnalysis.clarity}% · {strategy} · ~{optimizerAnalysis.estimate} tokens (rough estimate)</p>
+{optimizerAnalysis.missing.length>0&&<p className="hint">Missing details: {optimizerAnalysis.missing.join(' ')}</p>}
+{relevantPaths.length>0&&<p className="hint">Candidate files: {relevantPaths.join(', ')}</p>}
+<div style={{display:'flex',gap:8,alignItems:'center'}}><label htmlFor="prompt-strategy">Style</label><select id="prompt-strategy" value={strategy} onChange={e=>setStrategy(e.target.value as Strategy)}><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="detailed">Detailed</option></select></div>
+<div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}><label htmlFor="optimizer-budget">Max added tokens (estimate)</label><input id="optimizer-budget" type="number" min="0" max="500" value={maxExtraTokens} onChange={e=>setMaxExtraTokens(Math.max(0,Math.min(500,Number(e.target.value)||0)))} style={{width:70}}/></div>
+<details><summary>Review changes</summary><p className="hint">Added lines: {optimizerDiff.added.length} · Removed lines: {optimizerDiff.removed.length}</p><pre style={{whiteSpace:'pre-wrap',maxHeight:130,overflow:'auto'}}>{optimizerDiff.added.map(x=>'+ '+x).join('\n')||'No additions'}</pre>{optimizerDiff.removed.length>0&&<pre style={{whiteSpace:'pre-wrap'}}>{optimizerDiff.removed.map(x=>'- '+x).join('\n')}</pre>}</details>
+{!optimizerSafety.safe&&<p role="alert">Safety check: {optimizerSafety.issues.join(' ')}</p>}
+<textarea aria-label="Edit suggested prompt" value={suggestedPrompt} onChange={e=>setSuggestedPrompt(e.target.value)} rows={9} style={{width:'100%'}}/>
+<p className="hint">Original ~{estimateTokens(pendingPrompt)} tokens · proposed ~{estimateTokens(suggestedPrompt)} tokens (character-based estimates, not billing). No quality improvement is claimed.</p>
+<div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+<button disabled={busy||!suggestedPrompt.trim()||!optimizerSafety.safe} onClick={()=>{trackOptimizer(suggestedPrompt===optimizerAnalysis.suggestion?'approved':'edited');void send(suggestedPrompt);}}>Approve & send</button>
+<button disabled={busy} onClick={regenerateSuggestion}>Try another suggestion</button>
+<button disabled={busy} onClick={()=>{trackOptimizer('edited');setPrompt(suggestedPrompt);setPendingPrompt(null);}}>Edit in chat</button>
+<button disabled={busy} onClick={()=>{trackOptimizer('rejected');void send(pendingPrompt);}}>Reject & send original</button>
+<button disabled={busy} onClick={()=>{setPendingPrompt(null);setSuggestedPrompt('');}}>Cancel</button>
+</div><p className="hint">Local usage: {optimizerMetrics.runs} submitted · ~{optimizerMetrics.addedEstimate} net added tokens (estimate, not savings). Feedback: {feedback.approved} accepted · {feedback.edited} edited · {feedback.rejected} rejected. No prompt text stored in feedback.</p>
+</div>}<textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Gemini" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Gemini" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

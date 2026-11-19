@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from codex_profiles import choose_profile, profile_environment
-from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint, load_checkpoint
+from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, rotation_handoff, compact_history, write_checkpoint, load_checkpoint
 from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
 from aam_tui import RichTurn, rich_available, provider_model
 from smart_router import route as smart_route
@@ -69,7 +69,14 @@ def build_command(tool, model, session_id, prompt):
             cmd += ['--model', model]
         return cmd + [prompt]
     cmd = ['codex', 'exec']
-    if permission == 'read-only':
+    # The desktop engine already runs inside an OS-enforced sandbox.
+    # A second macOS Seatbelt profile fails with sandbox_apply: EPERM.
+    # Skip Codex's nested sandbox only when the desktop launcher explicitly
+    # confirms that the outer OS sandbox is active.
+    outer_sandbox = os.environ.get('AAM_OUTER_SANDBOX') == '1'
+    if outer_sandbox and permission in ('read-only', 'workspace-write'):
+        cmd += ['--dangerously-bypass-approvals-and-sandbox']
+    elif permission == 'read-only':
         cmd += ['--sandbox', 'read-only']
     elif permission == 'workspace-write':
         cmd += ['--sandbox', 'workspace-write']
@@ -145,6 +152,58 @@ def usage_from_output(tool, output):
         except json.JSONDecodeError:
             pass
     return {}
+
+
+
+
+def observed_model_activity(tool, output):
+    """Report only model activity explicitly observable in provider CLI output."""
+    if tool == 'claude':
+        try:
+            obj = json.loads(output)
+        except (ValueError, TypeError):
+            return {}
+        # num_turns is an agent-turn counter, NOT a count of API model calls.
+        count = obj.get('num_turns') if isinstance(obj, dict) else None
+        return {'agent_turns': count} if type(count) is int and count >= 0 else {}
+    # Codex exec JSON emits turn.completed for the whole request, not each model call.
+    # Do not misrepresent turn.completed as an internal model invocation.
+    return {}
+
+
+def usage_diagnostics(root, tool, output, reused_session, usage):
+    """Record only numeric usage metadata; never store prompts or provider output."""
+    events = []
+    if tool == 'codex':
+        for line in output.splitlines():
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if obj.get('type') in ('turn.completed', 'turn.failed'):
+                raw = obj.get('usage')
+                events.append({'type': obj['type'], 'usage': {
+                    key: value for key, value in (raw or {}).items()
+                    if key in ('input_tokens', 'cached_input_tokens', 'output_tokens')
+                    and type(value) is int and value >= 0
+                }})
+    entry = {
+        'utc': datetime.now(timezone.utc).isoformat(),
+        'provider': tool,
+        'observed_model_activity': observed_model_activity(tool, output),
+        'session_reused': bool(reused_session),
+        'usage_source': 'codex.turn.completed' if tool == 'codex' else 'claude.result',
+        'events': events,
+        'reported_usage': usage,
+        'uncached_input_tokens': max(0, usage['input_tokens'] - usage['cached_input_tokens'])
+            if 'input_tokens' in usage and 'cached_input_tokens' in usage
+            and usage['cached_input_tokens'] <= usage['input_tokens'] else None,
+        'note': 'Provider-reported turn usage; not the number of tokens typed by the user.'
+    }
+    path = store_path(root).with_name('usage-diagnostics.jsonl')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps(entry, ensure_ascii=False) + '\n')
 
 
 def record_usage(root, tool, model, seconds, usage, status, profile='default', task=None):
@@ -243,7 +302,8 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
     sid = cache_policy(state, tool, profile, prompt, env)
     previous = state.get('last_tool')
     switched = previous is not None and previous != tool
-    actual_prompt = (handoff(root, state, tool) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
+    rotated = not switched and sid is None and bool(sessions.get(session_key))
+    actual_prompt = (handoff(root, state, tool) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else (rotation_handoff(state, tool, prompt) if rotated else prompt)
     model = model_for_session(state, session_key, sid, model_for(tool, prompt, env))
     cmd = build_command(tool, model, sid, actual_prompt)
     before = repository_snapshot(root) if tool == 'claude' else None
@@ -257,7 +317,14 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
+    usage.update(observed_model_activity(tool, completed.stdout))
     state['last_usage'] = usage
+    if usage.get('input_tokens') is not None:
+        state.setdefault('session_input_tokens', {})[session_key] = usage['input_tokens']
+    try:
+        usage_diagnostics(root, tool, completed.stdout, bool(sid), usage)
+    except OSError as exc:
+        print(f'[aam] Usage diagnostics unavailable: {type(exc).__name__}', file=sys.stderr)
     if tool == 'claude':
         try:
             reported_model = provider_model(json.loads(completed.stdout))
@@ -378,6 +445,17 @@ def main():
                     answer, model = run_turn(root, tool, prompt, state, on_event=on_event, cancel_event=cancel_event)
             except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
                 message = str(e)
+                # Claude can invalidate stored conversation IDs between app launches.
+                # This failure happens before agent execution: discard only the stale
+                # provider session and retry once without --resume.
+                if (attempt == 0 and tool == 'claude'
+                        and 'No conversation found with session ID' in message):
+                    state.setdefault('sessions', {}).pop('claude', None)
+                    state.setdefault('session_input_tokens', {}).pop('claude', None)
+                    save(path, state)
+                    if ns.desktop_jsonl:
+                        emit_desktop('activity', provider=tool, event={'type': 'status', 'message': 'Claude session expired; starting a fresh session.'})
+                    continue
                 if on_event is None:
                     print(f'[aam] {message}', file=sys.stderr)
                 if isinstance(e, ProviderLimitError) or LIMIT.search(message):

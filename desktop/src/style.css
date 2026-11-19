@@ -69,3 +69,28 @@ aside select{width:100%;padding:11px 12px;border:1px solid #455260;border-radius
 
 .setup-terminal{background:#090f17;color:#d8e6e8;border:1px solid #46515f;border-radius:8px;padding:12px;min-height:100px;max-height:240px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 monospace}
 .setup-terminal-input{display:flex;gap:8px;margin-top:8px}.setup-terminal-input input{flex:1;min-width:0;background:#101821;color:#fff;border:1px solid #46515f;border-radius:6px;padding:8px}
+
+.prompt-usage{margin-top:14px;padding-top:12px;border-top:1px solid #35404c;color:#eaf2f5}
+.prompt-usage summary{cursor:pointer;color:#65d7c8;font-size:13px;font-weight:650}
+.prompt-usage .token-stats{margin-top:8px;padding:8px 0;border:0;font-size:13px}
+.prompt-usage small{display:block;font-weight:400;line-height:1.5}
+
+/* Distinguish providers using the provider that actually completed the request. */
+footer .send-button.antigravity:not(:disabled){background:#9a8de2;border-color:#9a8de2;color:#171327}
+footer .send-button.antigravity:not(:disabled):hover{background:#b4a9f0;box-shadow:0 0 0 3px rgba(154,141,226,.2)}
+footer .send-button.opencode:not(:disabled){background:#7ca7e4;border-color:#7ca7e4;color:#101c30}
+footer .send-button.opencode:not(:disabled):hover{background:#a0bff0;box-shadow:0 0 0 3px rgba(124,167,228,.2)}
+footer .send-button.copilot:not(:disabled){background:#b3a1d7;border-color:#b3a1d7;color:#20162c}
+footer .send-button.copilot:not(:disabled):hover{background:#cab9e8;box-shadow:0 0 0 3px rgba(179,161,215,.2)}
+article.assistant.provider-claude{border-left-color:#d68b61}
+article.assistant.provider-codex{border-left-color:#35b9ad}
+article.assistant.provider-antigravity{border-left-color:#9a8de2}
+article.assistant.provider-opencode{border-left-color:#7ca7e4}
+article.assistant.provider-copilot{border-left-color:#b3a1d7}
+
+/* Keep prompt suggestions usable on compact windows and short displays. */
+footer.composer{min-height:0;min-width:0;flex-shrink:0;max-height:75dvh;overflow-y:auto;overscroll-behavior:contain;align-items:flex-end;flex-wrap:wrap}
+footer.composer .prompt-suggestion{flex:1 1 100%;min-width:0;max-height:calc(75dvh - 100px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+footer.composer .prompt-suggestion textarea{max-height:min(28dvh,220px);min-height:80px;resize:vertical}
+footer.composer>.send-button{flex-shrink:0}
+@media(max-height:550px){footer.composer{max-height:85dvh}footer.composer .prompt-suggestion{max-height:calc(85dvh - 90px)}}

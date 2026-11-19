@@ -173,6 +173,9 @@ async fn install_provider_cli(provider: String) -> Result<String, String> {
     let package = match provider.as_str() {
         "claude" => "@anthropic-ai/claude-code",
         "codex" => "@openai/codex",
+        "antigravity" => return Err("Install Antigravity CLI from https://antigravity.google/docs/cli/tutorial and retry setup.".into()),
+        "opencode" => "@opencode/cli",
+        "copilot" => "@github/copilot",
         _ => return Err("Unsupported provider".into()),
     };
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
@@ -224,22 +227,30 @@ fn login_pty_write(input: String, state: tauri::State<'_, LoginSession>) -> Resu
 }
 
 #[tauri::command]
+fn cancel_provider_login(state: tauri::State<'_, LoginSession>) -> Result<(), String> {
+    use std::io::Write;
+    let mut guard = state.0.lock().map_err(|_| "Login session unavailable")?;
+    let writer = guard.as_mut().ok_or("No active login session")?;
+    // Ctrl-C is delivered to the foreground process via the PTY.
+    writer.write_all(&[3]).map_err(|_| "Unable to interrupt login")?;
+    writer.flush().map_err(|_| "Unable to interrupt login".to_string())
+}
+
+#[tauri::command]
 fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::State<'_, LoginSession>) -> Result<String, String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
         "claude" => ("claude", &["auth", "login"]),
         "codex" => ("codex", &["login"]),
+        "antigravity" => ("agy", &[]),
+        "opencode" => ("opencode", &["auth", "login"]),
+        "copilot" => ("copilot", &["login"]),
         _ => return Err("Unsupported provider".into()),
     };
-    let executable = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).flat_map(|p| {
-            let mut candidates = vec![p.join(binary)];
-            if cfg!(windows) {
-                for ext in ["exe", "cmd", "bat"] { candidates.push(p.join(format!("{binary}.{ext}"))); }
-            }
-            candidates
-        }).find(|p| p.is_file())
-    }).ok_or("Provider CLI not found. Recheck installation first.")?;
+    let executable = find_cli(binary).ok_or("Provider CLI not found. Recheck installation first.")?;
+    if state.0.lock().map_err(|_| "Login session unavailable")?.is_some() {
+        return Err("A login is already in progress. Cancel the previous login first.".into());
+    }
     let pty = native_pty_system().openpty(PtySize {
         rows: 24, cols: 100, pixel_width: 0, pixel_height: 0
     }).map_err(|_| "Could not create interactive login terminal".to_string())?;
@@ -293,18 +304,11 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
     for (id, binary, args) in [
         ("claude", "claude", vec!["auth", "status"]),
         ("codex", "codex", vec!["login", "status"]),
+        ("antigravity", "agy", vec!["--version"]),
+        ("opencode", "opencode", vec!["auth", "list"]),
+        ("copilot", "copilot", vec!["--version"]),
     ] {
-        let executable = std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths).flat_map(|p| {
-                let mut candidates = vec![p.join(binary)];
-                if cfg!(windows) {
-                    for ext in ["exe", "cmd", "bat"] {
-                        candidates.push(p.join(format!("{binary}.{ext}")));
-                    }
-                }
-                candidates
-            }).find(|p| p.is_file())
-        });
+        let executable = find_cli(binary);
         let Some(executable) = executable else {
             result.push(ProviderSetup { id: id.into(), installed: false, authenticated: false,
                 auth_status: "missing".into(), detail: "CLI not found in PATH".into() });
@@ -318,11 +322,22 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null()).kill_on_drop(true).status(),
         ).await;
-        let (authenticated, auth_status, detail) = match status {
-            Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
-            Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
-            Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
-            Err(_) => (false, "unknown", "Authentication check timed out"),
+        // Only Claude and Codex expose the verified auth-status probes used here.
+        // Other CLI exit codes are not evidence of an authenticated account.
+        let (authenticated, auth_status, detail) = if ["antigravity", "opencode", "copilot"].contains(&id) {
+            match status {
+                Ok(Ok(exit)) if exit.success() => (false, "unknown", "CLI detected; authentication must be verified in the provider"),
+                Ok(Ok(_)) => (false, "unknown", "CLI detected; login status not independently verified"),
+                Ok(Err(_)) => (false, "unknown", "Could not execute CLI"),
+                Err(_) => (false, "unknown", "CLI probe timed out"),
+            }
+        } else {
+            match status {
+                Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
+                Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
+                Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
+                Err(_) => (false, "unknown", "Authentication check timed out"),
+            }
         };
         result.push(ProviderSetup { id: id.into(), installed: true, authenticated,
             auth_status: auth_status.into(), detail: detail.into() });
@@ -338,27 +353,411 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
     Ok(())
 }
 
-#[tauri::command]
-async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
-    if !["claude", "codex", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
-    if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
-    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
-    let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
-    if !path.is_dir() { return Err("Workspace is not a directory".into()); }
-    let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
-    if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
-    let mut child = tokio::process::Command::new(aam_executable()?);
-    child.env("AAM_PERMISSION_MODE", &permission);
-    child.arg(&provider).arg("--root").arg(&path).arg("--desktop-jsonl")
-        .arg("--ui").arg("classic").arg("--prompt").arg(&prompt)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    let mut child = child.spawn().map_err(|e| format!("Cannot launch aam: {e}"))?;
-    let stop = Arc::new(tokio::sync::Notify::new());
-    {
-        let state = app.state::<RunningRequests>();
-        state.0.lock().map_err(|_|"Request state unavailable")?.insert(request_id.clone(),stop.clone());
+// Only Linux bubblewrap is supported for third-party CLI execution.
+// Never fall back to an unsandboxed subprocess when the sandbox is unavailable.
+// Single execution contract for all five providers. The legacy AAM engine
+// remains the transport for Claude/Codex until its event protocol is migrated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionAdapter { Engine, SandboxedCli }
+
+#[derive(Clone, Copy, Debug)]
+struct ProviderAdapter {
+    id: &'static str,
+    transport: ExecutionAdapter,
+}
+
+const PROVIDER_ADAPTERS: [ProviderAdapter; 5] = [
+    ProviderAdapter { id: "claude", transport: ExecutionAdapter::Engine },
+    ProviderAdapter { id: "codex", transport: ExecutionAdapter::Engine },
+    ProviderAdapter { id: "antigravity", transport: ExecutionAdapter::SandboxedCli },
+    ProviderAdapter { id: "opencode", transport: ExecutionAdapter::SandboxedCli },
+    ProviderAdapter { id: "copilot", transport: ExecutionAdapter::SandboxedCli },
+];
+
+fn provider_adapter(id: &str) -> Option<ProviderAdapter> {
+    PROVIDER_ADAPTERS.iter().copied().find(|adapter| adapter.id == id)
+}
+
+fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), String> {
+    if !["read-only", "workspace-write", "full-access"].contains(&permission) {
+        return Err("Invalid permission mode".into());
     }
+    if !cli_on_path(if adapter.id == "antigravity" { "agy" } else { adapter.id }) { return Err(format!("{} CLI not installed", adapter.id)); }
+    if permission != "full-access" && !external_sandbox_ready(permission) {
+        return Err("OS sandbox unavailable for requested permission".into());
+    }
+    match adapter.transport {
+        ExecutionAdapter::Engine => {
+            aam_executable().map(|_| ()).map_err(|_| "AAM engine unavailable".into())
+        },
+        ExecutionAdapter::SandboxedCli => external_provider_preflight(adapter.id, permission),
+    }
+}
+
+#[cfg(test)]
+mod adapter_contract_tests {
+    use super::{provider_adapter, ExecutionAdapter, PROVIDER_ADAPTERS};
+    #[test]
+    fn every_provider_has_exactly_one_adapter() {
+        let mut ids = std::collections::HashSet::new();
+        for adapter in PROVIDER_ADAPTERS {
+            assert!(ids.insert(adapter.id));
+        }
+        assert_eq!(ids.len(), 5);
+    }
+    #[test]
+    fn engine_and_sandbox_transports_are_explicit() {
+        assert_eq!(provider_adapter("claude").unwrap().transport, ExecutionAdapter::Engine);
+        assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::Engine);
+        for id in ["antigravity", "opencode", "copilot"] {
+            assert_eq!(provider_adapter(id).unwrap().transport, ExecutionAdapter::SandboxedCli);
+        }
+        assert!(provider_adapter("unknown").is_none());
+    }
+}
+
+fn external_sandbox_ready(permission: &str) -> bool {
+    if !["read-only", "workspace-write"].contains(&permission) { return false; }
+    #[cfg(target_os = "linux")]
+    { return cli_on_path("bwrap"); }
+    #[cfg(target_os = "macos")]
+    { return cli_on_path("sandbox-exec"); }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { false }
+}
+
+fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), String> {
+    if permission != "full-access" && !external_sandbox_ready(permission) {
+        return Err("No supported OS sandbox for this permission mode; execution blocked".into());
+    }
+    if !cli_on_path(if provider == "antigravity" { "agy" } else { provider }) { return Err(format!("{provider} CLI not installed")); }
+    Ok(())
+}
+
+// Escape the workspace for macOS Seatbelt's quoted sandbox profile syntax.
+// The profile grants writes only to the selected workspace and ephemeral /tmp.
+#[cfg(target_os = "macos")]
+fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String> {
+    fn quoted(path: &Path) -> Result<String, String> {
+        let text = path.to_str().ok_or("Sandbox path is not UTF-8")?;
+        if text.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+            return Err("Unsupported sandbox path".into());
+        }
+        Ok(text.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+    if permission != "read-only" && permission != "workspace-write" {
+        return Err("Unsupported sandbox permission".into());
+    }
+    // Codex needs to persist its local session, and AAM stores session state
+    // in Git metadata. Neither location is covered by the workspace path.
+    let home = std::env::var_os("HOME").ok_or("HOME unavailable")?;
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&home).join(".codex"));
+    let git_dir = std::process::Command::new("git")
+        .arg("-C").arg(root).args(["rev-parse", "--absolute-git-dir"])
+        .output().map_err(|_| "Cannot resolve Git metadata directory")?;
+    if !git_dir.status.success() { return Err("Cannot resolve Git metadata directory".into()); }
+    let git_path = PathBuf::from(String::from_utf8(git_dir.stdout)
+        .map_err(|_| "Invalid Git metadata path")?.trim());
+    let codex = quoted(&codex_home)?;
+    // The Python engine initializes provider profiles even for Claude.
+    let profile_state = quoted(&PathBuf::from(&home).join(".local/state/ai-agent-manager"))?;
+    let git = quoted(&git_path.join("ai-agent-manager"))?;
+    let workspace = if permission == "workspace-write" {
+        format!(r#"(subpath "{}")"#, quoted(root)?)
+    } else { String::new() };
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow ipc*) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{profile_state}") (subpath "{git}") {workspace})"#))
+}
+
+// One platform isolation policy for both engine and direct CLI transports.
+// On unsupported platforms, never silently launch an unrestricted child.
+fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &str) -> Result<tokio::process::Command, String> {
+    // Full access is an explicit user-approved opt-out of the OS sandbox.
+    if permission == "full-access" {
+        let mut command = tokio::process::Command::new(executable);
+        command.args(args).current_dir(root);
+        return Ok(command);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !cli_on_path("bwrap") { return Err("bubblewrap unavailable".into()); }
+        let mut command = tokio::process::Command::new("bwrap");
+        command.args(["--die-with-parent", "--unshare-pid", "--new-session",
+            "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
+            "--proc", "/proc", "--tmpfs", "/tmp"]);
+        if permission == "workspace-write" {
+            command.arg("--bind").arg(root).arg(root);
+        } else if permission != "read-only" {
+            return Err("Unsupported sandbox permission".into());
+        }
+        command.arg("--chdir").arg(root)
+            .arg("--").arg(executable).args(args);
+        Ok(command)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !cli_on_path("sandbox-exec") { return Err("Seatbelt sandbox unavailable".into()); }
+        let mut command = tokio::process::Command::new("sandbox-exec");
+        command.arg("-p").arg(macos_sandbox_profile(root, permission)?).arg(executable).args(args);
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (executable, args, root, permission);
+        Err("No supported OS sandbox; execution blocked".into())
+    }
+}
+
+// Start every Unix sandbox in its own process group so cancellation can
+// terminate descendants as well as the sandbox launcher.
+#[cfg(unix)]
+fn isolate_process_group(command: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // Negative PID targets the entire group, not only the leader.
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+// Shared execution deadline and cancellation contract for every adapter.
+async fn await_runtime<T, F>(future: F, stop: Arc<tokio::sync::Notify>) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::select! {
+        outcome = tokio::time::timeout(std::time::Duration::from_secs(600), future) =>
+            outcome.map_err(|_| "Request timed out after 10 minutes".to_string())?,
+        _ = stop.notified() => Err("Request cancelled".into()),
+    }
+}
+
+async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
+    let (binary, args): (&str, Vec<&str>) = match provider {
+        "antigravity" => ("agy", vec!["--print", prompt]),
+        "opencode" => ("opencode", vec!["run", prompt]),
+        "copilot" => ("copilot", vec!["-p", prompt, "-s", "--no-ask-user"]),
+        _ => return Err("Unsupported provider".into()),
+    };
+    external_provider_preflight(provider, permission)?;
+    let executable = find_cli(binary).ok_or(format!("{provider} CLI not found in PATH"))?;
+    let mut command = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
+    command.current_dir(root).stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]
+    isolate_process_group(&mut command);
+    let result = async {
+        let child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
+        #[cfg(unix)]
+        let group_pid = child.id();
+        let output_result = await_runtime(async {
+            child.wait_with_output().await.map_err(|_| "Agent process failed".to_string())
+        }, stop.clone()).await;
+        #[cfg(unix)]
+        if output_result.is_err() { kill_process_group(group_pid); }
+        let output = output_result?;
+        if !output.status.success() {
+            // Only use diagnostic output for classification. Never return it to the UI:
+            // CLI diagnostics can contain credentials, prompts, or private paths.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let diagnostic = format!("{} {}", stderr.chars().take(8192).collect::<String>(), stdout.chars().take(8192).collect::<String>());
+            let kind = classify_agent_error(&diagnostic);
+            if kind == "rate_limit" {
+                set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
+                return Err(format!("{provider} rate limit confirmed. Cooldown 5 minutes. Automatic replay blocked because the CLI may have modified files."));
+            }
+            if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
+            let exit_code = output.status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
+            eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}");
+            let hint = match provider {
+                "opencode" => "OpenCode failed. Verify its configured model/provider and whether it works non-interactively with 'opencode run'.",
+                "copilot" => "Copilot failed. GitHub device login alone does not confirm Copilot access; verify 'copilot -p' works in your terminal.",
+                "antigravity" => "Antigravity failed. Verify 'agy --print' works non-interactively in the same workspace.",
+                _ => "Provider CLI failed. Check its configuration and permissions.",
+            };
+            return Err(format!("{hint} (exit: {exit_code}, category: {kind})"));
+        }
+        if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let answer = text.to_string();
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"result","provider":provider,"model":"CLI default","answer":answer,"usage":{}
+        }}));
+        Ok(())
+    }.await;
+    result
+}
+
+// Deterministic routing: task fit first, availability second. No paid model calls.
+fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static str> {
+    let p = prompt.to_ascii_lowercase();
+    let ordered: Vec<&str> = if p.contains("review") || p.contains("audit") || p.contains("security") || p.contains("bug") {
+        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
+    } else if p.contains("architecture") || p.contains("design") || p.contains("refactor") || p.contains("plan") {
+        vec!["claude", "antigravity", "codex", "opencode", "copilot"]
+    } else if p.contains("github") || p.contains("pull request") || p.contains("issue") {
+        vec!["copilot", "codex", "claude", "antigravity", "opencode"]
+    } else if p.contains("explain") || p.contains("document") || p.contains("summar") {
+        vec!["antigravity", "claude", "codex", "opencode", "copilot"]
+    } else {
+        vec!["codex", "copilot", "claude", "opencode", "antigravity"]
+    };
+    let mut candidates: Vec<&str> = ordered.into_iter().filter(|id|
+        permission == "workspace-write" || ["claude", "codex"].contains(id)
+    ).collect();
+    if mode == "balanced" {
+        // Balanced prefers general-purpose agents, while respecting task constraints.
+        candidates.sort_by_key(|id| match *id {
+            "claude" => 0, "codex" => 1, "antigravity" => 2, "opencode" => 3, _ => 4
+        });
+    }
+    candidates
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::route_candidates;
+
+    #[test]
+    fn task_fit_prefers_expected_provider() {
+        assert_eq!(route_candidates("Review security bug", "auto", "workspace-write")[0], "codex");
+        assert_eq!(route_candidates("Explain this module", "auto", "workspace-write")[0], "antigravity");
+        assert_eq!(route_candidates("Create GitHub pull request", "auto", "workspace-write")[0], "copilot");
+    }
+
+    #[test]
+    fn permission_filter_excludes_uncontrolled_providers() {
+        for permission in ["read-only", "full-access"] {
+            assert_eq!(route_candidates("Explain this", "auto", permission).len(), 2);
+            assert!(route_candidates("Explain this", "auto", permission)
+                .iter().all(|id| ["claude", "codex"].contains(id)));
+        }
+    }
+
+    #[test]
+    fn classifies_provider_limits_without_exposing_output() {
+        use super::classify_agent_error;
+        for text in ["HTTP 429", "Rate limit exceeded", "RESOURCE_EXHAUSTED", "quota exceeded", "too many requests"] {
+            assert_eq!(classify_agent_error(text), "rate_limit");
+        }
+        assert_eq!(classify_agent_error("401 Unauthorized"), "auth_required");
+        assert_eq!(classify_agent_error("Compilation failed"), "unknown");
+    }
+    #[test]
+    fn external_sandbox_rejects_unsupported_permissions() {
+        use super::external_sandbox_ready;
+        // Availability depends on installed OS tools (bwrap on Linux, sandbox-exec on macOS).
+        // Assert the permission contract, not the CI runner's installed binaries.
+        assert_eq!(external_sandbox_ready("read-only"), external_sandbox_ready("workspace-write"));
+        assert!(!external_sandbox_ready("invalid"));
+        assert!(!external_sandbox_ready("full-access"));
+    }
+
+    #[test]
+    fn cooldown_excludes_provider_until_expiry() {
+        use super::{ProviderCooldowns, provider_available, set_provider_cooldown};
+        let cooldowns = ProviderCooldowns::default();
+        assert!(provider_available("antigravity", &cooldowns));
+        set_provider_cooldown("antigravity", &cooldowns);
+        assert!(!provider_available("antigravity", &cooldowns));
+        assert!(provider_available("codex", &cooldowns));
+    }
+
+    #[test]
+    fn balanced_is_stable() {
+        assert_eq!(route_candidates("Explain this", "balanced", "workspace-write")[0], "claude");
+    }
+}
+
+// Rate-limit cooldowns are process-local. They never imply that a failed edit is safe to replay.
+#[derive(Default)]
+struct ProviderCooldowns(Mutex<HashMap<String, std::time::Instant>>);
+
+fn provider_available(id: &str, cooldowns: &ProviderCooldowns) -> bool {
+    let Ok(mut limits) = cooldowns.0.lock() else { return false; };
+    limits.retain(|_, until| *until > std::time::Instant::now());
+    !limits.contains_key(id)
+}
+
+fn classify_agent_error(message: &str) -> &'static str {
+    let normalized = message.to_ascii_lowercase();
+    if ["rate limit", "rate_limit", "429", "quota exceeded", "resource_exhausted",
+        "usage limit", "too many requests", "credits exhausted", "limit reached"]
+        .iter().any(|phrase| normalized.contains(phrase)) { "rate_limit" }
+    else if ["unauthorized", "authentication required", "login required",
+        "not logged in", "invalid api key", "401"].iter()
+        .any(|phrase| normalized.contains(phrase)) { "auth_required" }
+    else { "unknown" }
+}
+
+fn set_provider_cooldown(id: &str, cooldowns: &ProviderCooldowns) {
+    if let Ok(mut limits) = cooldowns.0.lock() {
+        limits.insert(id.to_string(), std::time::Instant::now() + std::time::Duration::from_secs(300));
+    }
+}
+
+fn find_cli(binary: &str) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    // GUI applications on macOS may not inherit the interactive shell PATH.
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/bin"));
+    }
+    dirs.into_iter().flat_map(|dir| {
+        let mut candidates = vec![dir.join(binary)];
+        if cfg!(windows) {
+            for ext in ["exe", "cmd", "bat"] {
+                candidates.push(dir.join(format!("{binary}.{ext}")));
+            }
+        }
+        candidates
+    }).find(|path| path.is_file())
+}
+
+fn cli_on_path(binary: &str) -> bool {
+    find_cli(binary).is_some()
+}
+
+async fn verified_auth_probe(provider: &str) -> Option<bool> {
+    let args: &[&str] = match provider {
+        "claude" => &["auth", "status"],
+        "codex" => &["login", "status"],
+        // Do not mistake --version or auth-list exit status for an authenticated session.
+        _ => return None,
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8),
+        tokio::process::Command::new(provider).args(args)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).kill_on_drop(true).status()).await;
+    Some(matches!(result, Ok(Ok(status)) if status.success()))
+}
+
+#[tauri::command]
+async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
+    // The AAM engine is isolated by the same OS boundary as external CLIs.
+    // Its child processes inherit this sandbox.
+    let executable = aam_executable().map_err(|e| format!("PRESTART: {e}"))?;
+    let root_arg = root.to_str().ok_or("Invalid workspace path")?;
+    let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
+    let mut child = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
+    child.env("AAM_PERMISSION_MODE", permission);
+    // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
+    if permission != "full-access" { child.env("AAM_OUTER_SANDBOX", "1"); } else { child.env_remove("AAM_OUTER_SANDBOX"); }
+    child.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]
+    isolate_process_group(&mut child);
+    let mut child = child.spawn().map_err(|e| format!("PRESTART: Cannot launch aam: {e}"))?;
     let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
     let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
     let stderr_task = tokio::spawn(async move {
@@ -370,36 +769,211 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         log
     });
     let mut lines = BufReader::new(stdout).lines();
-    let mut cancelled = false;
-    let result = tokio::select! {
-        outcome = tokio::time::timeout(std::time::Duration::from_secs(600), async {
-            while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
+    let mut reported_limit = false;
+    let mut reported_error = false;
+    let mut reported_error_message = String::new();
+    let mut observed_execution = false;
+    let result = await_runtime(async {
+        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                if event.get("kind").and_then(|v| v.as_str()) == Some("error") {
+                    reported_error = true;
+                    let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    reported_error_message = message.chars().take(300).collect();
+                    if classify_agent_error(message) == "rate_limit" {
+                        reported_limit = true;
+                    }
                 }
+                // Unknown events are treated as possible execution.
+                let kind = event.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                let activity_type = event.get("event").and_then(|v| v.get("type"))
+                    .and_then(|v| v.as_str()).unwrap_or("");
+                let pre_execution = match kind {
+                    "provider" | "routing" | "error" => true,
+                    "activity" => matches!(activity_type, "thread.started" | "turn.started"),
+                    _ => false,
+                };
+                if !pre_execution { observed_execution = true; }
+                let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
             }
-            child.wait().await.map_err(|e| e.to_string())
-        }) => outcome.map_err(|_|"Request timed out after 10 minutes".to_string()).and_then(|r|r),
-        _ = stop.notified() => { cancelled = true; Err("Request stopped by user".to_string()) }
-    };
-    if cancelled || result.is_err() {
-        // kill_on_drop terminates the AAM process; the engine's subprocess handling
-        // may need separate process-group cleanup on each supported OS.
+        }
+        child.wait().await.map_err(|e| e.to_string())
+    }, stop.clone()).await;
+    if result.is_err() {
+        #[cfg(unix)]
+        kill_process_group(child.id());
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
-    {
-        let state = app.state::<RunningRequests>();
-        if let Ok(mut requests) = state.0.lock() { requests.remove(&request_id); };
-    }
-    if let Err(message) = result.as_ref() {
-        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
-    }
     let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
-    if result.as_ref().is_ok_and(|status| !status.success()) {
-        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":stderr}}));
+    if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
+        set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
+    }
+    if reported_error || result.as_ref().is_ok_and(|status| !status.success()) {
+        let message = if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
+            if reported_limit && !observed_execution && result.is_ok() {
+                format!("PREEXEC: {provider} rate limit before task execution")
+            } else {
+                format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
+            }
+        } else if classify_agent_error(&stderr) == "auth_required" {
+            format!("{provider} authentication required.")
+        } else {
+            // Avoid exposing stderr in UI: it can include prompts and secrets.
+            // A local diagnostic log preserves the actual sandbox failure.
+            let exit_status = result.as_ref().ok().map(|status| status.to_string()).unwrap_or_else(|| "interrupted".into());
+            let stderr_diagnostic: String = stderr.lines()
+                .filter(|line| !line.starts_with("[aam] Agent ready:"))
+                .take(12).collect::<Vec<_>>().join("\\n");
+            eprintln!("AAM {provider} engine failed (status={exit_status}, structured_error={reported_error_message:?}, observed_execution={observed_execution}): {stderr_diagnostic}");
+            format!("{provider} engine exited unsuccessfully. See the Tauri terminal for sanitized diagnostics.")
+        };
+        return Err(message);
     }
     result.map(|_| ())
+}
+
+// Auto/Balanced advances on provider limits even after a process started.
+// The next provider receives a continuation request to inspect existing changes,
+// rather than blindly repeating the original instructions.
+fn retry_after_failure(automatic: bool, _permission: &str, error: &str) -> bool {
+    automatic && (retry_before_spawn(error) || error.starts_with("PREEXEC:") || error.contains("rate limit detected"))
+}
+
+fn retry_before_spawn(error: &str) -> bool {
+    error.starts_with("PRESTART:")
+}
+
+#[cfg(test)]
+mod execution_fallback_tests {
+    use super::retry_before_spawn;
+    #[test]
+    fn only_prestart_errors_allow_fallback() {
+        assert!(retry_before_spawn("PRESTART: executable missing"));
+        for message in ["Agent timed out", "rate limit", "Request cancelled",
+            "authentication required", "CLI failed", "spawned process failed"] {
+            assert!(!retry_before_spawn(message));
+        }
+    }
+    #[test]
+    fn fallback_requires_proven_pre_execution_failure() {
+        use super::retry_after_failure;
+        assert!(retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
+        assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
+        assert!(retry_after_failure(true, "workspace-write", "claude rate limit detected; cooldown 5 minutes. Automatic replay blocked."));
+        assert!(!retry_after_failure(false, "workspace-write", "claude rate limit detected; cooldown 5 minutes. Automatic replay blocked."));
+        assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
+        assert!(!retry_after_failure(true, "read-only", "CLI failed"));
+        assert!(!retry_after_failure(false, "read-only", "CLI failed"));
+        assert!(!retry_after_failure(true, "read-only", "Request cancelled"));
+        assert!(!retry_after_failure(true, "read-only", "Request timed out after 10 minutes"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_permissions_limit_workspace_writes() {
+        use super::macos_sandbox_profile;
+        use std::path::Path;
+        let root = Path::new("/tmp/aam-test");
+        let read_only = macos_sandbox_profile(root, "read-only").unwrap();
+        let write = macos_sandbox_profile(root, "workspace-write").unwrap();
+        assert!(!read_only.contains(r#"(subpath "/tmp/aam-test")"#));
+        assert!(write.contains(r#"(subpath "/tmp/aam-test")"#));
+        assert!(macos_sandbox_profile(root, "full-access").is_err());
+    }
+    #[test]
+    fn unsupported_permissions_fail_closed() {
+        assert!(!super::external_sandbox_ready("full-access"));
+        assert!(!super::external_sandbox_ready("unknown"));
+    }
+
+}
+
+async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, adapter: ProviderAdapter, prompt: &str, permission: &str) -> Result<(), String> {
+    validate_execution(adapter, permission)?;
+    let stop = Arc::new(tokio::sync::Notify::new());
+    {
+        let state = app.state::<RunningRequests>();
+        let mut requests = state.0.lock().map_err(|_| "Request state unavailable")?;
+        if requests.contains_key(request_id) { return Err("Request already running".into()); }
+        requests.insert(request_id.to_string(), stop.clone());
+    }
+    let result = match adapter.transport {
+        ExecutionAdapter::Engine =>
+            run_engine_adapter(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
+        ExecutionAdapter::SandboxedCli =>
+            run_external_provider(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
+    };
+    if let Ok(mut requests) = app.state::<RunningRequests>().0.lock() {
+        requests.remove(request_id);
+    }
+    result
+}
+
+#[tauri::command]
+async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
+    if !["claude", "codex", "antigravity", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
+    if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
+    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
+    let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    if !path.is_dir() { return Err("Workspace is not a directory".into()); }
+    let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
+    if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
+    let automatic = provider == "auto" || provider == "balanced";
+    let candidates: Vec<&str> = if automatic {
+        route_candidates(&prompt, &provider, &permission)
+    } else {
+        vec![provider.as_str()]
+    };
+    let mut last_preflight_error = String::from("No compatible agent CLI available");
+    let mut continue_after_limit = false;
+    for candidate in candidates {
+        let Some(adapter) = provider_adapter(candidate) else { continue; };
+        if automatic && !provider_available(candidate, &app.state::<ProviderCooldowns>()) {
+            continue;
+        }
+        if let Err(message) = validate_execution(adapter, &permission) {
+            last_preflight_error = message;
+            continue;
+        }
+        if verified_auth_probe(candidate).await == Some(false) {
+            last_preflight_error = format!("{candidate} requires authentication");
+            continue;
+        }
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"routing","reason":format!("Executing {candidate}; preflight passed"),
+            "provider":candidate,"model":"CLI default"
+        }}));
+        // Provider limits trigger a continuation on the next available provider.
+        let continuation_prompt;
+        let active_prompt = if continue_after_limit {
+            continuation_prompt = format!("Continue the user's task from the CURRENT repository state. Inspect git status and diff first; do not repeat completed edits or operations. Original request:\n{prompt}");
+            continuation_prompt.as_str()
+        } else { prompt.as_str() };
+        match execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await {
+            Err(message) if retry_after_failure(automatic, &permission, &message) => {
+                continue_after_limit |= message.contains("rate limit detected");
+                last_preflight_error = message;
+                let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                    "kind":"routing","provider":candidate,
+                    "reason":"Provider unavailable; continuing with next available provider"
+                }}));
+                continue;
+            }
+            outcome => {
+                if let Err(ref message) = outcome {
+                    let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                        "kind":"process_error","provider":candidate,"message":message
+                    }}));
+                }
+                return outcome;
+            },
+        }
+    }
+    let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+        "kind":"process_error","message":last_preflight_error
+    }}));
+    Err(last_preflight_error)
 }
 
 
@@ -476,8 +1050,46 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
     project_architect::apply(Path::new(&root), proposals)
 }
 
+#[tauri::command]
+fn relevant_prompt_files(root: String, prompt: String) -> Result<Vec<String>, String> {
+    let root = Path::new(&root).canonicalize().map_err(|e| e.to_string())?;
+    let output = Command::new("git").arg("-C").arg(&root).args(["ls-files", "-z"])
+        .output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err("Not a Git repository".into()); }
+    let terms: Vec<String> = prompt.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 4).map(|t| t.to_ascii_lowercase()).collect();
+    let mut matches: Vec<(usize,String)> = output.stdout.split(|b| *b == 0).filter_map(|bytes| {
+        let path = String::from_utf8(bytes.to_vec()).ok()?;
+        let lower = path.to_ascii_lowercase();
+        if [".env", "secret", "credential", "node_modules/", "build/", "dist/"].iter().any(|x| lower.contains(x)) { return None; }
+        let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
+        if score == 0 { None } else { Some((score,path)) }
+    }).collect();
+    matches.sort_by(|a,b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    Ok(matches.into_iter().take(8).map(|(_,path)| path).collect())
+}
+
+#[tauri::command]
+fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -> Result<(), String> {
+    if !state.0.lock().map_err(|_| "Request state unavailable")?.is_empty() {
+        return Err("Stop the running agent before clearing its session".into());
+    }
+    let root = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    let git_dir = Command::new("git").arg("-C").arg(&root)
+        .args(["rev-parse", "--absolute-git-dir"]).output()
+        .map_err(|e| format!("Git: {e}"))?;
+    if !git_dir.status.success() { return Err("Workspace must be a Git repository".into()); }
+    let git_path = String::from_utf8(git_dir.stdout).map_err(|e| e.to_string())?;
+    let session = Path::new(git_path.trim()).join("ai-agent-manager").join("agent-bridge.json");
+    if session.exists() {
+        std::fs::remove_file(&session).map_err(|e| format!("Cannot clear session: {e}"))?;
+    }
+    Ok(())
+}
+
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
+        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![relevant_prompt_files, clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }

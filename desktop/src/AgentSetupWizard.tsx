@@ -2,10 +2,11 @@ import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+type ProviderId = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'copilot';
 type NodeStatus = { installed: boolean; detail: string; installer: string };
 
 type ProviderStatus = {
-  id: 'claude' | 'codex';
+  id: ProviderId;
   installed: boolean;
   authenticated: boolean;
   authStatus: 'ready' | 'missing' | 'login_required' | 'unknown';
@@ -25,7 +26,42 @@ const setup = {
     install: 'npm install -g @openai/codex',
     login: 'codex login',
   },
+  antigravity: {
+    name: 'Antigravity CLI',
+    docs: 'https://google-antigravity.github.io/antigravity-cli/docs/get-started/',
+    install: 'npm install -g @google/antigravity-cli',
+    login: 'agy',
+  },
+  opencode: {
+    name: 'OpenCode',
+    docs: 'https://opencode.ai/docs/cli/providers/',
+    install: 'npm install -g @opencode/cli',
+    login: 'opencode auth login',
+  },
+  copilot: {
+    name: 'GitHub Copilot CLI',
+    docs: 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli',
+    install: 'npm install -g @github/copilot',
+    login: 'copilot login',
+  },
 } as const;
+
+// Gemini and other CLIs draw full-screen terminal UIs using ANSI sequences.
+// Display readable text instead of exposing raw escape codes in the setup panel.
+function readableTerminal(raw: string): string {
+  return raw
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[()][0-9A-Za-z]/g, '')
+    .replace(/\x1b[=>]/g, '')
+    .replace(/\x1b./g, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+    .split('\n')
+    .filter(line => line.trim().length > 0)
+    .slice(-35)
+    .join('\n');
+}
 
 export default function AgentSetupWizard() {
   const [statuses, setStatuses] = React.useState<ProviderStatus[]>([]);
@@ -37,7 +73,7 @@ export default function AgentSetupWizard() {
   const [working, setWorking] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState('');
   const [authPending, setAuthPending] = React.useState(false);
-  const [authProvider, setAuthProvider] = React.useState<'claude' | 'codex' | null>(null);
+  const [authProvider, setAuthProvider] = React.useState<ProviderId | null>(null);
   const [terminalOutput, setTerminalOutput] = React.useState('');
   const [terminalInput, setTerminalInput] = React.useState('');
   const [terminalOpen, setTerminalOpen] = React.useState(false);
@@ -65,17 +101,25 @@ export default function AgentSetupWizard() {
     void listen<{ text: string; finished: boolean }>('provider-login-output', event => {
       if (disposed) return;
       if (event.payload.text) setTerminalOutput(previous => (previous + event.payload.text).slice(-16000));
-      if (event.payload.finished) setTerminalOpen(false);
+      if (event.payload.finished) {
+        setTerminalOpen(false);
+        // The PTY exiting does not prove login succeeded. Recheck explicitly.
+        void invoke<ProviderStatus[]>('provider_setup_status').then(setStatuses).catch(() => {});
+        void invoke('focus_after_login').catch(() => {});
+      }
     }).then(fn => { if (disposed) fn(); else unlisten = fn; }).catch(e => setError(String(e)));
     return () => { disposed = true; unlisten?.(); };
   }, []);
+  const sendPty = async (input: string) => {
+    try { await invoke('login_pty_write', { input }); }
+    catch (e) { setError(String(e)); }
+  };
   const sendTerminalInput = async () => {
-    try {
-      await invoke('login_pty_write', { input: terminalInput + '\\r' });
-      setTerminalInput('');
-    } catch (e) { setError(String(e)); }
+    await sendPty(terminalInput + '\r');
+    setTerminalInput('');
   };
   const ready = statuses.some(item => item.authenticated);
+  const needsSetup = statuses.some(item => !item.authenticated);
   const installNode = async () => {
     if (!window.confirm('Install Node.js and npm using ' + (node?.installer || 'the OS package manager') + '? This downloads software and may request administrator authorization.')) return;
     setWorking('node'); setError(''); setNotice('');
@@ -85,10 +129,10 @@ export default function AgentSetupWizard() {
     } catch (e) { setError(String(e)); }
     finally { setWorking(null); }
   };
-  const perform = async (id: 'claude' | 'codex', action: 'install' | 'login') => {
-    if (action === 'install' && !window.confirm('Install ' + setup[id].name + ' globally using npm? This downloads software from the npm registry and changes your system environment.')) return;
+  const perform = async (id: ProviderId, action: 'install' | 'login') => {
+    if (action === 'install' && !window.confirm('Install ' + setup[id].name + '? This downloads software from the npm registry and changes your system environment.')) return;
     setWorking(id); setError(''); setNotice('');
-    if (action === 'login') { setTerminalOutput(''); setTerminalOpen(true); }
+    setTerminalOutput(''); setTerminalOpen(true);
     try {
       const message = await invoke<string>(action === 'install' ? 'install_provider_cli' : 'open_provider_login', { provider: id });
       if (action === 'install') {
@@ -142,50 +186,58 @@ export default function AgentSetupWizard() {
 
   return <>
     <button type="button" className="setup-launch" onClick={() => { setOpen(true); void refresh(); }}>
-      Agent setup {checking ? '· checking…' : ready ? '· ready' : '· action required'}
+      Agent setup {checking ? '· checking…' : needsSetup ? '· setup available' : ready ? '· ready' : '· action required'}
     </button>
     {open && <div className="setup-overlay" role="presentation">
       <section className="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
         <div className="setup-top">
-          <div><h2 id="setup-title">Set up AI agents</h2><p className="hint">Install and sign in to at least one CLI to run AI requests. No credentials are collected by this app.</p></div>
+          <div><h2 id="setup-title">Set up AI agents</h2><p className="hint">Install and sign in to an agent CLI. Antigravity, OpenCode and Copilot use external CLI adapters; authenticate with their official login flows. No credentials are collected by this app.</p></div>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }} aria-label="Close setup">Close</button>
         </div>
-        {error && <p role="alert" className="error">{error}</p>}
+        {error && <p role="alert" className="error">{error}{error.includes('already in progress') && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setError('Login interruption requested. Retry when the previous session closes.'); } catch (e) { setError(String(e)); } }}>Cancel previous login</button>}</p>}
         {notice && <p role="status" className="hint">{notice}</p>}
-        <div className="setup-provider">
-          <h3>Node.js + npm <span className={node?.installed ? 'setup-ready' : 'setup-needed'}>{node?.installed ? 'Ready' : 'Required for CLI installation'}</span></h3>
-          <p className="hint">{node?.detail || 'Checking Node.js…'} · Installer: {node?.installer || 'detecting…'}</p>
-          {!node?.installed && <button type="button" disabled={!!working || checking} onClick={() => void installNode()}>{working === 'node' ? 'Installing Node.js…' : 'Install Node.js automatically'}</button>}
-        </div>
-        <div className="setup-providers">
-          {(['claude', 'codex'] as const).map(id => {
-            const item = statuses.find(s => s.id === id);
-            const guide = setup[id];
-            const installed = item?.installed;
-            const authenticated = item?.authenticated;
-            return <div className="setup-provider" key={id}>
-              <h3>{guide.name} <span className={authenticated ? 'setup-ready' : 'setup-needed'}>{authenticated ? 'Ready' : !installed ? 'Not installed' : item?.authStatus === 'unknown' ? 'Auth unverified' : 'Sign in required'}</span></h3>
-              {!installed && <div><p>1. Install the CLI (requires Node.js/npm):</p><button type="button" disabled={!!working || !node?.installed} onClick={() => void perform(id, "install")}>{working === id ? "Installing…" : "Install automatically"}</button><details><summary>Manual alternative</summary><code>{guide.install}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.install)}>Copy</button></details></div>}
-              {installed && !authenticated && <div><p>2. Authenticate using the provider browser flow:</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>Open login</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
-              {authenticated && <p>CLI installed and authentication confirmed.</p>}
-              <p className="hint">{item?.detail || 'Checking CLI status…'} · <a href={guide.docs} target="_blank" rel="noopener noreferrer">Official setup guide</a></p>
-            </div>;
-          })}
-        </div>
         {(terminalOpen || terminalOutput) && <div className="setup-provider" aria-label="Embedded provider login terminal">
           <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
-          <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
+          <pre className="setup-terminal" aria-live="off">{readableTerminal(terminalOutput) || 'Waiting for provider login…'}</pre>
+          {terminalOpen && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setNotice('Login interruption requested. Wait for the terminal to close before retrying.'); } catch (e) { setError(String(e)); } }}>Cancel active login</button>}
+          {terminalOpen && <div className="setup-terminal-controls" aria-label="Interactive terminal navigation">
+            <button type="button" onClick={() => void sendPty('\x1b[A')}>Up</button>
+            <button type="button" onClick={() => void sendPty('\x1b[B')}>Down</button>
+            <button type="button" onClick={() => void sendPty('\r')}>Enter / Confirm</button>
+            <button type="button" onClick={() => void sendPty('\x1b')}>Escape</button>
+          </div>}
           {terminalOpen && <form onSubmit={e => { e.preventDefault(); void sendTerminalInput(); }} className="setup-terminal-input">
             <input aria-label="Terminal input" type="text" value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Enter CLI response, if requested" autoComplete="off" />
             <button type="submit">Send</button>
           </form>}
           <p className="hint">OAuth may open your default browser. Never enter passwords or recovery codes in this terminal; authenticate on the provider's official page.</p>
         </div>}
+        <div className="setup-provider">
+          <h3>Node.js + npm <span className={node?.installed ? 'setup-ready' : 'setup-needed'}>{node?.installed ? 'Ready' : 'Required for CLI installation'}</span></h3>
+          <p className="hint">{node?.detail || 'Checking Node.js…'} · Installer: {node?.installer || 'detecting…'}</p>
+          {!node?.installed && <button type="button" disabled={!!working || checking} onClick={() => void installNode()}>{working === 'node' ? 'Installing Node.js…' : 'Install Node.js automatically'}</button>}
+        </div>
+        <div className="setup-providers">
+          {(['claude', 'codex', 'antigravity', 'opencode', 'copilot'] as const).map(id => {
+            const item = statuses.find(s => s.id === id);
+            const guide = setup[id];
+            const installed = item?.installed;
+            const authenticated = item?.authenticated;
+            return <div className="setup-provider" key={id}>
+              <h3>{guide.name} <span className={authenticated ? 'setup-ready' : 'setup-needed'}>{authenticated ? 'Ready' : !installed ? 'Not installed' : item?.authStatus === 'unknown' ? 'Auth unverified' : 'Sign in required'}</span></h3>
+              {!installed && <div><p>1. Install the CLI:</p><button type="button" disabled={!!working || !node?.installed || id === "antigravity"} onClick={() => void perform(id, "install")}>{working === id ? "Installing…" : id === "antigravity" ? "Use manual installer below" : "Install automatically"}</button><details><summary>Manual alternative</summary><code>{guide.install}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.install)}>Copy</button></details></div>}
+              {installed && !authenticated && <div><p>2. Authenticate using the provider browser flow:</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>Open login</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
+              {authenticated && <p>CLI installed and authentication confirmed.</p>}
+              {installed && item?.authStatus === 'unknown' && <p className="hint">Authentication is not independently verified for this provider. Complete the provider login flow and check its own account status. The app will not claim Ready without verification.</p>}
+              <p className="hint">{item?.detail || 'Checking CLI status…'} · <a href={guide.docs} target="_blank" rel="noopener noreferrer">Official setup guide</a></p>
+            </div>;
+          })}
+        </div>
         <div className="setup-actions">
           <button type="button" onClick={() => void refresh()} disabled={checking}>{checking ? 'Checking…' : 'Recheck installation and login'}</button>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }}>{ready ? 'Continue' : 'Skip for now'}</button>
         </div>
-        <p className="hint">Node.js is installed using the OS package manager after confirmation. CLI installation runs through npm after confirmation. After CLI installation, the app starts an embedded interactive terminal and checks authentication automatically. Provider OAuth may require your default browser. Credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
+        <p className="hint">Node.js is installed using the OS package manager after confirmation. Most CLI installations use npm; Antigravity requires its official installer. After CLI installation, the app starts an embedded interactive terminal and checks authentication automatically. Provider OAuth may require your default browser. Credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
       </section>
     </div>}
   </>;
