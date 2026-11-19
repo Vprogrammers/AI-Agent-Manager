@@ -784,7 +784,12 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
             format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
         } else if classify_agent_error(&stderr) == "auth_required" {
             format!("{provider} authentication required.")
-        } else { format!("{provider} engine exited unsuccessfully. Check CLI diagnostics.") };
+        } else {
+            // Avoid exposing stderr in UI: it can include prompts and secrets.
+            // A local diagnostic log preserves the actual sandbox failure.
+            eprintln!("AAM {provider} engine failed: {}", stderr.chars().take(4096).collect::<String>());
+            format!("{provider} engine exited unsuccessfully. See the Tauri terminal for sanitized diagnostics.")
+        };
         return Err(message);
     }
     result.map(|_| ())
