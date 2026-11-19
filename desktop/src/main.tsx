@@ -65,9 +65,27 @@ function cacheRatio(usage: TokenUsage): string | null {
 }
 function TokenTable({usage}: {usage:TokenUsage}) {
   const rows = usageRows(usage);
+  if (!rows.length) return <p className="token-empty">Not reported by provider</p>;
+  const input = usage.input_tokens;
   const cached = usage.cached_input_tokens ?? usage.cache_read_input_tokens;
-  const uncached = typeof usage.input_tokens === 'number' && typeof cached === 'number' && cached <= usage.input_tokens ? usage.input_tokens - cached : null;
-  return rows.length ? <div className="token-stats">{uncached !== null && <div className="token-row"><strong>Uncached input</strong><strong className="token-value">{numberFormat(uncached)}</strong></div>}{rows.map(([label,value],i)=><div className="token-row" key={i}><span>{label}</span><span className="token-value">{numberFormat(value)}</span></div>)}{cacheRatio(usage)&&<div className="token-row"><span>Cached share</span><span className="token-value">{cacheRatio(usage)}</span></div>}</div> : <p className="token-empty">Not reported</p>;
+  // Codex input includes cached tokens; Claude reports cache reads/creation separately.
+  const isInclusive = typeof input === 'number' && typeof cached === 'number' && input >= cached;
+  const newInput = typeof input === 'number' ? (isInclusive ? input - cached : input) : null;
+  const processedInput = typeof input === 'number'
+    ? input + (isInclusive ? 0 : (cached ?? 0)) + (usage.cache_creation_input_tokens ?? 0)
+    : null;
+  const processed = processedInput === null ? null : processedInput + (usage.output_tokens ?? 0);
+  const row = (label:string, value:number|string) => <div className="token-row" key={label}><span>{label}</span><strong className="token-value">{typeof value === 'number' ? numberFormat(value) : value}</strong></div>;
+  return <div className="token-stats">
+    {processed !== null && row('Total processed (reported)', processed)}
+    {newInput !== null && row('New input', newInput)}
+    {typeof cached === 'number' && row('Cached input', cached)}
+    {typeof usage.cache_creation_input_tokens === 'number' && row('Cache creation', usage.cache_creation_input_tokens)}
+    {typeof usage.output_tokens === 'number' && row('Output', usage.output_tokens)}
+    {row('Internal model calls', 'Not reported')}
+    <details><summary>Raw provider counters</summary>{rows.map(([label,value],i)=><div className="token-row" key={i}><span>{label}</span><span className="token-value">{numberFormat(value)}</span></div>)}</details>
+    <small>Provider counters are not directly comparable across Claude and Codex. Total processed is an estimate from reported counters, not billing or quota usage. Model call count is unavailable unless explicitly reported.</small>
+  </div>;
 }
 
 const WORKSPACES_KEY = 'aam.desktop.workspaces.v1';
