@@ -65,6 +65,34 @@ function cacheRatio(usage: TokenUsage): string | null {
   const cached = usage.cached_input_tokens ?? usage.cache_read_input_tokens;
   return input > 0 && cached !== undefined && cached <= input ? (100*cached/input).toFixed(1)+'%' : null;
 }
+type AgentStep = { time:string; label:string; status:'running'|'done'|'info' };
+function describeAgentStep(ev: Record<string,unknown>): AgentStep | null {
+  const type = String(ev.type || '');
+  const item = ev.item && typeof ev.item === 'object' ? ev.item as Record<string,unknown> : {};
+  const itemType = String(item.type || '');
+  const command = itemType === 'command_execution' ? String(item.command || '') : '';
+  // Commands may contain secrets in arguments. Show the operation type, not raw CLI arguments.
+  const labels: Record<string,string> = {
+    command_execution:'Executing shell command', file_change:'Editing project files',
+    mcp_tool_call:'Calling external tool', web_search:'Searching documentation',
+    reasoning:'Analyzing', agent_message:'Preparing response'
+  };
+  if (type === 'turn.started') return {time:new Date().toLocaleTimeString(),label:'Starting agent turn',status:'running'};
+  if (type === 'turn.completed') return {time:new Date().toLocaleTimeString(),label:'Agent turn completed',status:'done'};
+  if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
+    if (!labels[itemType] && !command) return null;
+    if (type === 'item.updated') return null;
+    return {time:new Date().toLocaleTimeString(),label:labels[itemType] || 'Processing tool',status:type === 'item.started'?'running':'done'};
+  }
+  if (type === 'tool_use') return {time:new Date().toLocaleTimeString(),label:'Using '+String(ev.name || 'tool').slice(0,60),status:'running'};
+  if (type === 'tool_result') return {time:new Date().toLocaleTimeString(),label:'Tool finished',status:'done'};
+  if (type === 'content_block_start') {
+    const block = ev.content_block as Record<string,unknown> | undefined;
+    if (block?.type === 'tool_use') return {time:new Date().toLocaleTimeString(),label:'Using '+String(block.name || 'tool').slice(0,60),status:'running'};
+  }
+  return null;
+}
+
 function TokenTable({usage}: {usage:TokenUsage}) {
   const rows = usageRows(usage);
   if (!rows.length) return <p className="token-empty">Not reported by provider</p>;
@@ -224,6 +252,8 @@ function App() {
   const [lastProvider, setLastProvider] = React.useState<string>('None');
   const [limitNotice, setLimitNotice] = React.useState('');
   const [activity, setActivity] = React.useState('');
+  const [agentSteps, setAgentSteps] = React.useState<AgentStep[]>([]);
+  const [showSteps, setShowSteps] = React.useState(true);
   const [timing, setTiming] = React.useState<{provider:string;preflightMs:number;executionMs:number;totalMs:number}|null>(null);
   const [liveText, setLiveText] = React.useState('');
   const [liveProvider, setLiveProvider] = React.useState<Provider>('claude');
@@ -325,6 +355,7 @@ function App() {
     const requestStarted = Date.now();
     let completed = false;
     setTiming(null);
+    setAgentSteps([]);
     let streamText = '';
     let codexSnapshot = '';
     let claudeSnapshot = '';
@@ -345,6 +376,8 @@ function App() {
         } else if (kind === 'activity') {
           const ev = data.event as Record<string,unknown> | undefined;
           if (ev) {
+            const step = describeAgentStep(ev);
+            if (step) setAgentSteps(previous=>[...previous,step].slice(-120));
             const eventType = String(ev.type || 'activity');
             const item = ev.item as Record<string,unknown> | undefined;
             setActivity(eventType + (item?.type ? ' · '+item.type : ''));
@@ -475,7 +508,7 @@ function App() {
         <button className="clear-usage" disabled={busy||usageHistory.length===0} onClick={()=>{if(window.confirm('Clear desktop usage history for this workspace?')){localStorage.removeItem(USAGE_PREFIX+root);setUsageHistory([]);}}}>Clear desktop history</button>
       </>}
     </div></aside>
-    <main>{timing&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>Timing · {timing.provider} · preflight {timing.preflightMs} ms · execution {timing.executionMs} ms · total {timing.totalMs} ms</div>}{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={`${m.role} ${m.role === "assistant" ? `provider-${m.provider}` : ""}`}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small><pre>{m.text}</pre>{m.role==='assistant'&&m.usage&&<details className="prompt-usage"><summary>Tokens for this prompt · {m.model} · {m.duration}s</summary><TokenTable usage={m.usage}/><small>Provider-reported turn usage, including repeated cached context. Uncached input is input minus cached input, not just your typed text. Raw numeric diagnostics: .git/ai-agent-manager/usage-diagnostics.jsonl.</small></details>}</article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><pre>{liveText}<span className="stream-cursor">▍</span></pre></article>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}>{pendingPrompt!==null&&<div className="prompt-suggestion" role="region" aria-label="Suggested prompt" style={{padding:12,border:'1px solid var(--border, #777)',borderRadius:8,margin:8}}>
+    <main>{timing&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>Timing · {timing.provider} · preflight {timing.preflightMs} ms · execution {timing.executionMs} ms · total {timing.totalMs} ms</div>}{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={`${m.role} ${m.role === "assistant" ? `provider-${m.provider}` : ""}`}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small><pre>{m.text}</pre>{m.role==='assistant'&&m.usage&&<details className="prompt-usage"><summary>Tokens for this prompt · {m.model} · {m.duration}s</summary><TokenTable usage={m.usage}/><small>Provider-reported turn usage, including repeated cached context. Uncached input is input minus cached input, not just your typed text. Raw numeric diagnostics: .git/ai-agent-manager/usage-diagnostics.jsonl.</small></details>}</article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><pre>{liveText}<span className="stream-cursor">▍</span></pre></article>}{agentSteps.length>0&&<div className="agent-steps"><button className="agent-steps-toggle" onClick={()=>setShowSteps(v=>!v)} aria-expanded={showSteps}>Agent activity · {agentSteps.length} events · {showSteps?'Hide':'Show'}</button>{showSteps&&<ol className="agent-steps-list">{agentSteps.map((step,i)=><li key={i} className={'agent-step-'+step.status}><span className="agent-step-time">{step.time}</span><span>{step.label}</span></li>)}</ol>}</div>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}>{pendingPrompt!==null&&<div className="prompt-suggestion" role="region" aria-label="Suggested prompt" style={{padding:12,border:'1px solid var(--border, #777)',borderRadius:8,margin:8}}>
 <strong>Suggested improved prompt</strong>
 <p className="hint">Local scripts only · no AI calls · {optimizerAnalysis.kind} · clarity heuristic {optimizerAnalysis.clarity}% · {strategy} · ~{optimizerAnalysis.estimate} tokens (rough estimate)</p>
 {optimizerAnalysis.missing.length>0&&<p className="hint">Missing details: {optimizerAnalysis.missing.join(' ')}</p>}
