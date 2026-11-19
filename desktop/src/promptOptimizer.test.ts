@@ -3,7 +3,7 @@ import { analyzePrompt, isDirectCommand, recommendedStrategy, emptyFeedback, val
 function assert(condition:boolean, message:string):void {if(!condition)throw Error(message);}
 assert(isDirectCommand('git status'),'git status must bypass expansion');
 assert(analyzePrompt('git status').suggestion==='git status','simple command unchanged');
-const bug=analyzePrompt('Fix login crash',[],[],'balanced');
+const bug=analyzePrompt('Fix login',[],[],'balanced');
 assert(bug.kind==='bug','bug detection');
 assert(bug.suggestion.includes('root cause'),'bug guidance');
 assert(bug.missing.length>0,'missing reproduction');
