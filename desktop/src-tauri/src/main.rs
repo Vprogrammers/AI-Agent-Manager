@@ -681,19 +681,38 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             }
             diagnostic
         });
-        let mut lines = BufReader::new(stdout).lines();
+        // Read raw bytes instead of lines: many CLIs flush partial text without
+        // a newline. Emit each UTF-8-safe chunk immediately to the desktop.
+        use tokio::io::AsyncReadExt;
+        let mut output = BufReader::new(stdout);
         let mut answer = String::new();
+        let mut pending_utf8 = Vec::<u8>::new();
+        let mut buffer = [0u8; 4096];
         let read_result = await_runtime(async {
-            while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+            loop {
+                let n = output.read(&mut buffer).await.map_err(|e| e.to_string())?;
+                if n == 0 { break; }
                 if first_output_ms.is_none() { first_output_ms = Some(process_started.elapsed().as_millis()); }
-                if answer.len() + line.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
-                answer.push_str(&line);
-                answer.push('\n');
-                // External CLIs emit plain-text output; stream each line as it arrives.
-                let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
-                    "kind":"activity","event":{"type":"external.output","provider":provider,"text":line}
-                }}));
+                pending_utf8.extend_from_slice(&buffer[..n]);
+                let valid_len = match std::str::from_utf8(&pending_utf8) {
+                    Ok(_) => pending_utf8.len(),
+                    Err(error) if error.error_len().is_none() => error.valid_up_to(),
+                    Err(_) => return Err("CLI emitted invalid UTF-8 output".into()),
+                };
+                if valid_len > 0 {
+                    let chunk = std::str::from_utf8(&pending_utf8[..valid_len])
+                        .map_err(|e| e.to_string())?;
+                    if answer.len() + chunk.len() > 4_000_000 {
+                        return Err("Agent response exceeded output limit".into());
+                    }
+                    answer.push_str(chunk);
+                    let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                        "kind":"activity","event":{"type":"external.chunk","provider":provider,"text":chunk}
+                    }}));
+                    pending_utf8.drain(..valid_len);
+                }
             }
+            if !pending_utf8.is_empty() { return Err("CLI output ended with incomplete UTF-8".into()); }
             child.wait().await.map_err(|e| e.to_string())
         }, stop.clone()).await;
         if read_result.is_err() {
