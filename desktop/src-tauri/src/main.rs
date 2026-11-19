@@ -732,8 +732,6 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     result.map(|_| ())
 }
 
-}
-
 async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, adapter: ProviderAdapter, prompt: &str, permission: &str) -> Result<(), String> {
     validate_execution(adapter, permission)?;
     let result = match adapter.transport {
