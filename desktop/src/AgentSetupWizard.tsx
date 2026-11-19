@@ -93,11 +93,13 @@ export default function AgentSetupWizard() {
     }).then(fn => { if (disposed) fn(); else unlisten = fn; }).catch(e => setError(String(e)));
     return () => { disposed = true; unlisten?.(); };
   }, []);
+  const sendPty = async (input: string) => {
+    try { await invoke('login_pty_write', { input }); }
+    catch (e) { setError(String(e)); }
+  };
   const sendTerminalInput = async () => {
-    try {
-      await invoke('login_pty_write', { input: terminalInput + '\\r' });
-      setTerminalInput('');
-    } catch (e) { setError(String(e)); }
+    await sendPty(terminalInput + '\\r');
+    setTerminalInput('');
   };
   const ready = statuses.some(item => item.authenticated);
   const needsSetup = statuses.some(item => !item.authenticated);
@@ -181,6 +183,12 @@ export default function AgentSetupWizard() {
           <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
           <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
           {terminalOpen && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setNotice('Login interruption requested. Wait for the terminal to close before retrying.'); } catch (e) { setError(String(e)); } }}>Cancel active login</button>}
+          {terminalOpen && <div className="setup-terminal-controls" aria-label="Interactive terminal navigation">
+            <button type="button" onClick={() => void sendPty('\\x1b[A')}>Up</button>
+            <button type="button" onClick={() => void sendPty('\\x1b[B')}>Down</button>
+            <button type="button" onClick={() => void sendPty('\\r')}>Enter / Confirm</button>
+            <button type="button" onClick={() => void sendPty('\\x1b')}>Escape</button>
+          </div>}
           {terminalOpen && <form onSubmit={e => { e.preventDefault(); void sendTerminalInput(); }} className="setup-terminal-input">
             <input aria-label="Terminal input" type="text" value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Enter CLI response, if requested" autoComplete="off" />
             <button type="submit">Send</button>
