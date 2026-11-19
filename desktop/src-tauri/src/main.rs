@@ -536,6 +536,7 @@ fn macos_sandbox_profile(root: &Path, permission: &str, provider: &str) -> Resul
             ".cache/antigravity", ".gemini",
         ],
         "copilot" => &[
+            ".copilot", // Copilot CLI stores session-state and session events here.
             ".config/copilot", ".local/share/copilot",
             ".cache/copilot",
         ],
@@ -1106,6 +1107,10 @@ mod execution_fallback_tests {
         assert!(opencode.contains(".local/share/opencode"));
         assert!(opencode.contains(".cache/opencode"));
         assert!(!write.contains(".local/share/opencode"));
+        let copilot = macos_sandbox_profile(root, "workspace-write", "copilot").unwrap();
+        assert!(copilot.contains(".copilot"));
+        assert!(!write.contains(".copilot"));
+        assert!(!opencode.contains(".copilot"));
 
     }
     #[test]
