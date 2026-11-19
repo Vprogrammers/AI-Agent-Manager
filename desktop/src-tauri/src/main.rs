@@ -866,7 +866,7 @@ fn workspace_fingerprint(root: &Path) -> Result<Vec<u8>, String> {
 
 // A provider handoff must account for edits made by the previous provider.
 fn continuation_prompt(original: &str) -> String {
-    format!("Continue the user's task from the CURRENT repository state. Inspect git status and diff first; do not repeat completed edits or operations. Original request:\n{original}")
+    format!("You are taking over an IN-PROGRESS task from another agent. Continue from the CURRENT workspace, not from scratch. Inspect git status, git diff (staged and unstaged), recent commits, and relevant files first. Preserve all existing edits, including uncommitted work. Determine what has already been completed; do not repeat completed edits or external side effects (publishing, deleting, payments, API writes). If an operation cannot be verified, ask for confirmation before repeating it. Keep the original project instructions and constraints. Original request:\n{original}")
 }
 
 #[cfg(test)]
@@ -1011,10 +1011,15 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             Err(message) if retry_after_failure(automatic, &permission, &message) => {
                 if message.contains("rate limit detected") {
                     let after = workspace_fingerprint(&path)?;
-                    if before != after {
-                        return Err(format!("{candidate} reached a limit after modifying the workspace. Review Git changes and resume explicitly; automatic failover blocked."));
-                    }
+                    // Partial edits are a reason to inspect state, not a reason to
+                    // prohibit switching agents. Never replay the original task.
                     continue_after_limit = true;
+                    if before != after {
+                        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                            "kind":"routing","provider":candidate,
+                            "reason":"Workspace changed during previous agent run; switching with a state-review continuation, not replaying the task"
+                        }}));
+                    }
                 }
                 last_preflight_error = message;
                 let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
