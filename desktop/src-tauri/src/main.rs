@@ -786,8 +786,8 @@ mod execution_fallback_tests {
         let root = Path::new("/tmp/aam-test");
         let read_only = macos_sandbox_profile(root, "read-only").unwrap();
         let write = macos_sandbox_profile(root, "workspace-write").unwrap();
-        assert!(!read_only.contains("(subpath \\"/tmp/aam-test\\")"));
-        assert!(write.contains("(subpath \\"/tmp/aam-test\\")"));
+        assert!(!read_only.contains(r#"(subpath "/tmp/aam-test")"#));
+        assert!(write.contains(r#"(subpath "/tmp/aam-test")"#));
         assert!(macos_sandbox_profile(root, "full-access").is_err());
     }
     #[test]
