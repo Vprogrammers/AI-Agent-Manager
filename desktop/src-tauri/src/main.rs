@@ -312,7 +312,7 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
     for (id, binary, args) in [
         ("claude", "claude", vec!["auth", "status"]),
         ("codex", "codex", vec!["login", "status"]),
-        ("antigravity", "antigravity", vec!["--version"]),
+        ("antigravity", "agy", vec!["--version"]),
         ("opencode", "opencode", vec!["auth", "list"]),
         ("copilot", "copilot", vec!["--version"]),
     ] {
