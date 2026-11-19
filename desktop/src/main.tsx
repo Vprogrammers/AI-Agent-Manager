@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
+import { analyzePrompt, recommendedStrategy, emptyFeedback, type Strategy, type Feedback } from './promptOptimizer';
 
 type Provider = 'claude' | 'codex' | 'antigravity' | 'opencode' | 'copilot';
 type RoutingMode = Provider | 'auto' | 'balanced';
@@ -167,15 +168,23 @@ function App() {
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
-  const [optimizerOpen, setOptimizerOpen] = React.useState(false);
   const [pendingPrompt, setPendingPrompt] = React.useState<string | null>(null);
   const [suggestedPrompt, setSuggestedPrompt] = React.useState('');
-  const [suggestionRevision, setSuggestionRevision] = React.useState(0);
+  const [strategy, setStrategy] = React.useState<Strategy>('balanced');
+  const [feedback, setFeedback] = React.useState<Feedback>(()=>{try { const saved=JSON.parse(localStorage.getItem('aam.optimizer.feedback.v1')||'null'); return saved&&saved.strategy? saved as Feedback:emptyFeedback(); } catch{return emptyFeedback();}});
   const [relevantPaths, setRelevantPaths] = React.useState<string[]>([]);
-  const [useOptimized, setUseOptimized] = React.useState(false);
-  const optimizerPreview = React.useMemo(()=>previewPrompt(prompt),[prompt]);
-  const expansionPreview = React.useMemo(()=>expandPrompt(prompt),[prompt]);
-  React.useEffect(()=>{ if (!optimizerOpen || !root || !prompt.trim()) { setRelevantPaths([]); return; } let active=true; void invoke<string[]>('relevant_prompt_files',{root,prompt}).then(paths=>{if(active)setRelevantPaths(paths);}).catch(()=>{if(active)setRelevantPaths([]);}); return ()=>{active=false;}; },[optimizerOpen,root,prompt]);
+  const [optimizerInstructions, setOptimizerInstructions] = React.useState<string[]>([]);
+  const [suggestionRevision, setSuggestionRevision] = React.useState(0);
+  const optimizerAnalysis = React.useMemo(()=>analyzePrompt(pendingPrompt||'',relevantPaths,optimizerInstructions,strategy,messages.length>0),[pendingPrompt,relevantPaths,optimizerInstructions,strategy,messages.length]);
+  const trackOptimizer = (action:'approved'|'edited'|'regenerated'|'rejected') => {
+    setFeedback(prev=>{const next={...prev,[action]:prev[action]+1,strategy:{...prev.strategy,[strategy]:prev.strategy[strategy]+1}};localStorage.setItem('aam.optimizer.feedback.v1',JSON.stringify(next));return next;});
+  };
+  React.useEffect(()=>{if(!pendingPrompt||!root){setRelevantPaths([]);setOptimizerInstructions([]);return;}let active=true;
+    void invoke<string[]>('relevant_prompt_files',{root,prompt:pendingPrompt}).then(paths=>{if(active)setRelevantPaths(paths);}).catch(()=>{if(active)setRelevantPaths([]);});
+    void invoke<AiConfigItem[]>('project_ai_config',{root}).then(config=>{if(active)setOptimizerInstructions(config.map(x=>x.path).filter(Boolean).slice(0,4));}).catch(()=>{if(active)setOptimizerInstructions([]);});
+    return ()=>{active=false;};
+  },[pendingPrompt,root]);
+  React.useEffect(()=>{if(pendingPrompt)setSuggestedPrompt(optimizerAnalysis.suggestion);},[optimizerAnalysis,pendingPrompt]);
   const [permission, setPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
   const [messages, setMessages] = React.useState<Message[]>([]);
   const [busy, setBusy] = React.useState(false);
@@ -263,25 +272,17 @@ function App() {
     } catch (e) { setError('Cannot clear session: ' + String(e)); }
   };
   const submitPrompt = () => {
-    const original = prompt.trim();
-    if (!original || busy || !root.trim()) return;
-    if (original === '/clear' || original === '/new') { void clearSession(); return; }
-    const compact = previewPrompt(original).optimized;
-    const expanded = expandPrompt(compact).draft;
-    setPendingPrompt(original);
-    setSuggestedPrompt(expanded);
-    setSuggestionRevision(0);
+    const original=prompt.trim();
+    if(!original||busy||!root.trim())return;
+    if(original==='/clear'||original==='/new'){void clearSession();return;}
+    const chosen=recommendedStrategy(feedback);
+    setStrategy(chosen);setPendingPrompt(original);setSuggestionRevision(0);
+    setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0).suggestion);
   };
   const regenerateSuggestion = () => {
-    if (!pendingPrompt) return;
-    const next = suggestionRevision + 1;
-    setSuggestionRevision(next);
-    const base = previewPrompt(pendingPrompt).optimized;
-    const expanded = expandPrompt(base);
-    // Deterministic alternatives; never claim a second AI model reviewed the request.
-    setSuggestedPrompt(next % 2
-      ? [base, '', 'Before implementation:', '- Inspect relevant existing files and project instructions.', '- Identify missing details; ask when they block safe changes.', '- Preserve existing behavior outside the requested scope.', '- Verify the result with available tests and report limitations.'].join('\n')
-      : expanded.draft);
+    if(!pendingPrompt)return;
+    const next:Strategy=strategy==='balanced'?'concise':strategy==='concise'?'detailed':'balanced';
+    trackOptimizer('regenerated');setStrategy(next);setSuggestionRevision(n=>n+1);
   };
   const send = async (approvedText?: string) => {
     const text = (approvedText ?? prompt).trim();
@@ -446,15 +447,21 @@ function App() {
       </>}
     </div></aside>
     <main>{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={`${m.role} ${m.role === "assistant" ? `provider-${m.provider}` : ""}`}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small><pre>{m.text}</pre>{m.role==='assistant'&&m.usage&&<details className="prompt-usage"><summary>Tokens for this prompt · {m.model} · {m.duration}s</summary><TokenTable usage={m.usage}/><small>Provider-reported turn usage, including repeated cached context. Uncached input is input minus cached input, not just your typed text. Raw numeric diagnostics: .git/ai-agent-manager/usage-diagnostics.jsonl.</small></details>}</article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><pre>{liveText}<span className="stream-cursor">▍</span></pre></article>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}>{pendingPrompt!==null&&<div role="region" aria-label="Suggested prompt" style={{padding:12,border:'1px solid var(--border, #777)',borderRadius:8,margin:8}}>
-<strong>Suggested improved prompt</strong><p className="hint">Review before sending. The original request is preserved. Suggestions use local rules, not an AI model.</p>
+<strong>Suggested improved prompt</strong>
+<p className="hint">Local scripts only · no AI calls · {optimizerAnalysis.kind} · clarity heuristic {optimizerAnalysis.clarity}% · {strategy} · ~{optimizerAnalysis.estimate} tokens (rough estimate)</p>
+{optimizerAnalysis.missing.length>0&&<p className="hint">Missing details: {optimizerAnalysis.missing.join(' ')}</p>}
+{relevantPaths.length>0&&<p className="hint">Candidate files: {relevantPaths.join(', ')}</p>}
+<div style={{display:'flex',gap:8,alignItems:'center'}}><label htmlFor="prompt-strategy">Style</label><select id="prompt-strategy" value={strategy} onChange={e=>setStrategy(e.target.value as Strategy)}><option value="concise">Concise</option><option value="balanced">Balanced</option><option value="detailed">Detailed</option></select></div>
 <textarea aria-label="Edit suggested prompt" value={suggestedPrompt} onChange={e=>setSuggestedPrompt(e.target.value)} rows={9} style={{width:'100%'}}/>
+<p className="hint">Original ~{Math.ceil(pendingPrompt.length/4)} tokens · proposed ~{Math.ceil(suggestedPrompt.length/4)} tokens (character-based estimates, not billing). No quality improvement is claimed.</p>
 <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-<button disabled={busy||!suggestedPrompt.trim()} onClick={()=>void send(suggestedPrompt)}>Approve & send</button>
-<button disabled={busy} onClick={()=>regenerateSuggestion()}>Try another suggestion</button>
-<button disabled={busy} onClick={()=>{setPrompt(suggestedPrompt);setPendingPrompt(null);}}>Edit in chat</button>
-<button disabled={busy} onClick={()=>void send(pendingPrompt)}>Reject & send original</button>
+<button disabled={busy||!suggestedPrompt.trim()} onClick={()=>{trackOptimizer(suggestedPrompt===optimizerAnalysis.suggestion?'approved':'edited');void send(suggestedPrompt);}}>Approve & send</button>
+<button disabled={busy} onClick={regenerateSuggestion}>Try another suggestion</button>
+<button disabled={busy} onClick={()=>{trackOptimizer('edited');setPrompt(suggestedPrompt);setPendingPrompt(null);}}>Edit in chat</button>
+<button disabled={busy} onClick={()=>{trackOptimizer('rejected');void send(pendingPrompt);}}>Reject & send original</button>
 <button disabled={busy} onClick={()=>{setPendingPrompt(null);setSuggestedPrompt('');}}>Cancel</button>
-</div></div>}<textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Gemini" : liveProvider === "auto" || liveProvider === "balanced" ? "agent" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Gemini" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
+</div><p className="hint">Local feedback counts: {feedback.approved} accepted · {feedback.edited} edited · {feedback.rejected} rejected. No prompt text stored in feedback.</p>
+</div>}<textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Gemini" : liveProvider === "auto" || liveProvider === "balanced" ? "agent" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Gemini" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
