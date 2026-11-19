@@ -74,3 +74,10 @@ aside select{width:100%;padding:11px 12px;border:1px solid #455260;border-radius
 .prompt-usage summary{cursor:pointer;color:#65d7c8;font-size:13px;font-weight:650}
 .prompt-usage .token-stats{margin-top:8px;padding:8px 0;border:0;font-size:13px}
 .prompt-usage small{display:block;font-weight:400;line-height:1.5}
+
+/* Distinguish providers using the provider that actually completed the request. */
+article.assistant.provider-claude{border-left-color:#d68b61}
+article.assistant.provider-codex{border-left-color:#35b9ad}
+article.assistant.provider-antigravity{border-left-color:#9a8de2}
+article.assistant.provider-opencode{border-left-color:#7ca7e4}
+article.assistant.provider-copilot{border-left-color:#b3a1d7}
