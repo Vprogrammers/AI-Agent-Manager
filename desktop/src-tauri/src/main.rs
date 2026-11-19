@@ -573,7 +573,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             let kind = classify_agent_error(&diagnostic);
             if kind == "rate_limit" {
                 set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
-                return Err(format!("{provider} rate limit confirmed. Cooldown 5 minutes. Automatic replay blocked because the CLI may have modified files."));
+                return Err(format!("{provider} rate limit detected; cooldown 5 minutes. Continuing with a repository-state review on the next provider."));
             }
             if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
             let exit_code = output.status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
@@ -873,6 +873,7 @@ mod execution_fallback_tests {
         assert!(retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
         assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
         assert!(retry_after_failure(true, "workspace-write", "claude rate limit detected; cooldown 5 minutes. Automatic replay blocked."));
+        assert!(retry_after_failure(true, "workspace-write", "copilot rate limit detected; cooldown 5 minutes. Continuing with a repository-state review on the next provider."));
         assert!(!retry_after_failure(false, "workspace-write", "claude rate limit detected; cooldown 5 minutes. Automatic replay blocked."));
         assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
         assert!(!retry_after_failure(true, "read-only", "CLI failed"));
