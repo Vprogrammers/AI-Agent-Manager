@@ -427,6 +427,17 @@ def main():
                     answer, model = run_turn(root, tool, prompt, state, on_event=on_event, cancel_event=cancel_event)
             except (RuntimeError, ValueError, json.JSONDecodeError, InterruptedError) as e:
                 message = str(e)
+                # Claude can invalidate stored conversation IDs between app launches.
+                # This failure happens before agent execution: discard only the stale
+                # provider session and retry once without --resume.
+                if (attempt == 0 and tool == 'claude'
+                        and 'No conversation found with session ID' in message):
+                    state.setdefault('sessions', {}).pop('claude', None)
+                    state.setdefault('session_input_tokens', {}).pop('claude', None)
+                    save(path, state)
+                    if ns.desktop_jsonl:
+                        emit_desktop('activity', provider=tool, event={'type': 'status', 'message': 'Claude session expired; starting a fresh session.'})
+                    continue
                 if on_event is None:
                     print(f'[aam] {message}', file=sys.stderr)
                 if isinstance(e, ProviderLimitError) or LIMIT.search(message):
