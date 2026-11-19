@@ -37,9 +37,9 @@ class OptimizerTests(unittest.TestCase):
     def test_rotates_oversized_session(self):
         state = {'sessions': {'codex:coding': 'old'}, 'session_input_tokens': {'codex:coding': 707181}}
         self.assertIsNone(cache_policy(state, 'codex', 'coding', 'git status -sb', {}))
-        self.assertEqual(cache_policy(state, 'codex', 'coding', 'git status -sb',
+        self.assertEqual(cache_policy(state, 'codex', 'coding', 'continue previous work',
                                       {'AAM_AUTO_ROTATE_SESSIONS': '0'}), 'old')
-        self.assertEqual(cache_policy(state, 'codex', 'coding', 'git status -sb',
+        self.assertEqual(cache_policy(state, 'codex', 'coding', 'continue previous work',
                                       {'AAM_SESSION_ROTATE_TOKENS': '900000'}), 'old')
 
     def test_rotation_only_carries_context_for_followups(self):
