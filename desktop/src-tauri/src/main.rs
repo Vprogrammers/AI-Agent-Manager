@@ -341,14 +341,24 @@ async fn probe_provider_auth(id: &str, executable: &std::path::Path) -> (bool, &
         "opencode" => (&["auth", "list", "--format", "json"], "OpenCode provider account detected"),
         "antigravity" => (&["models"], "Antigravity models available through authenticated CLI"),
         "copilot" => {
-            // Copilot may reuse the GitHub CLI credential. This checks GitHub login,
-            // not whether the account has Copilot entitlement.
-            if let Some(gh) = find_cli("gh") {
-                if auth_probe_output(&gh, &["auth", "status"]).await.is_some_and(|out| out.status.success()) {
-                    return (false, "unknown", "GitHub CLI authenticated; Copilot account entitlement not independently verified");
+            // Copilot's own OAuth login stores a credential in the macOS keychain.
+            // Query metadata only; never retrieve or log the secret itself.
+            #[cfg(target_os = "macos")]
+            {
+                let security = std::path::Path::new("/usr/bin/security");
+                if auth_probe_output(security, &["find-generic-password", "-s", "copilot-cli"])
+                    .await.is_some_and(|out| out.status.success()) {
+                    return (true, "ready", "Copilot CLI OAuth credential detected in macOS Keychain; entitlement checked on execution");
                 }
             }
-            return (false, "unknown", "Copilot login not independently verified; run Copilot to confirm access");
+            // GitHub CLI credentials are an officially supported Copilot fallback.
+            // This verifies the login, not Copilot license or organization policy.
+            if let Some(gh) = find_cli("gh") {
+                if auth_probe_output(&gh, &["auth", "status"]).await.is_some_and(|out| out.status.success()) {
+                    return (true, "ready", "GitHub CLI login detected (Copilot fallback); entitlement checked on execution");
+                }
+            }
+            return (false, "unknown", "Copilot credentials not detected; use Copilot login or check your provider account");
         }
         _ => return (false, "unknown", "Unsupported provider authentication probe"),
     };
