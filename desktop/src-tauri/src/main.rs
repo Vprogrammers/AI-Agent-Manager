@@ -498,7 +498,7 @@ fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), S
 // Escape the workspace for macOS Seatbelt's quoted sandbox profile syntax.
 // The profile grants writes only to the selected workspace and ephemeral /tmp.
 #[cfg(target_os = "macos")]
-fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String> {
+fn macos_sandbox_profile(root: &Path, permission: &str, provider: &str) -> Result<String, String> {
     fn quoted(path: &Path) -> Result<String, String> {
         let text = path.to_str().ok_or("Sandbox path is not UTF-8")?;
         if text.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
@@ -524,15 +524,36 @@ fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String
     // The Python engine initializes provider profiles even for Claude.
     let profile_state = quoted(&PathBuf::from(&home).join(".local/state/ai-agent-manager"))?;
     let git = quoted(&git_path.join("ai-agent-manager"))?;
+    // External CLIs maintain their own state outside the selected workspace.
+    // Allow only the active provider's known cache/config/state locations, never HOME.
+    let provider_paths: &[&str] = match provider {
+        "opencode" => &[
+            ".config/opencode", ".local/share/opencode",
+            ".local/state/opencode", ".cache/opencode",
+        ],
+        "antigravity" => &[
+            ".config/antigravity", ".local/share/antigravity",
+            ".cache/antigravity", ".gemini",
+        ],
+        "copilot" => &[
+            ".config/copilot", ".local/share/copilot",
+            ".cache/copilot",
+        ],
+        _ => &[],
+    };
+    let provider_writes = provider_paths.iter()
+        .map(|relative| quoted(&PathBuf::from(&home).join(relative))
+            .map(|path| format!(r#"(subpath "{path}")"#)))
+        .collect::<Result<Vec<_>, _>>()?.join(" ");
     let workspace = if permission == "workspace-write" {
         format!(r#"(subpath "{}")"#, quoted(root)?)
     } else { String::new() };
-    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow ipc*) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{profile_state}") (subpath "{git}") {workspace})"#))
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow ipc*) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{profile_state}") (subpath "{git}") {provider_writes} {workspace})"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
 // On unsupported platforms, never silently launch an unrestricted child.
-fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &str) -> Result<tokio::process::Command, String> {
+fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &str, provider: &str) -> Result<tokio::process::Command, String> {
     // Full access is an explicit user-approved opt-out of the OS sandbox.
     if permission == "full-access" {
         let mut command = tokio::process::Command::new(executable);
@@ -559,12 +580,12 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &s
     {
         if !cli_on_path("sandbox-exec") { return Err("Seatbelt sandbox unavailable".into()); }
         let mut command = tokio::process::Command::new("sandbox-exec");
-        command.arg("-p").arg(macos_sandbox_profile(root, permission)?).arg(executable).args(args);
+        command.arg("-p").arg(macos_sandbox_profile(root, permission, provider)?).arg(executable).args(args);
         Ok(command)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (executable, args, root, permission);
+        let _ = (executable, args, root, permission, provider);
         Err("No supported OS sandbox; execution blocked".into())
     }
 }
@@ -610,7 +631,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     };
     external_provider_preflight(provider, permission)?;
     let executable = find_cli(binary).ok_or(format!("{provider} CLI not found in PATH"))?;
-    let mut command = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
+    let mut command = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     #[cfg(unix)]
@@ -1051,11 +1072,16 @@ mod execution_fallback_tests {
         use super::macos_sandbox_profile;
         use std::path::Path;
         let root = Path::new("/tmp/aam-test");
-        let read_only = macos_sandbox_profile(root, "read-only").unwrap();
-        let write = macos_sandbox_profile(root, "workspace-write").unwrap();
+        let read_only = macos_sandbox_profile(root, "read-only", "codex").unwrap();
+        let write = macos_sandbox_profile(root, "workspace-write", "codex").unwrap();
         assert!(!read_only.contains(r#"(subpath "/tmp/aam-test")"#));
         assert!(write.contains(r#"(subpath "/tmp/aam-test")"#));
-        assert!(macos_sandbox_profile(root, "full-access").is_err());
+        assert!(macos_sandbox_profile(root, "full-access", "codex").is_err());
+        let opencode = macos_sandbox_profile(root, "workspace-write", "opencode").unwrap();
+        assert!(opencode.contains(".local/share/opencode"));
+        assert!(opencode.contains(".cache/opencode"));
+        assert!(!write.contains(".local/share/opencode"));
+
     }
     #[test]
     fn unsupported_permissions_fail_closed() {
