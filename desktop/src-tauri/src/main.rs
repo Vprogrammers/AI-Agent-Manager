@@ -358,15 +358,75 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
     Ok(())
 }
 
+async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
+    let (binary, args): (&str, Vec<&str>) = match provider {
+        "gemini" => ("gemini", vec!["-p", prompt, "--output-format", "json"]),
+        "opencode" => ("opencode", vec!["run", prompt]),
+        "copilot" => ("copilot", vec!["-p", prompt, "-s", "--no-ask-user"]),
+        _ => return Err("Unsupported provider".into()),
+    };
+    // Do not silently grant full filesystem or shell access to new providers.
+    if permission == "full-access" {
+        return Err("Full-access mode is not yet supported for this provider; choose read-only or workspace-write.".into());
+    }
+    let executable = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).flat_map(|p| {
+            let mut candidates = vec![p.join(binary)];
+            if cfg!(windows) {
+                for ext in ["exe", "cmd", "bat"] { candidates.push(p.join(format!("{binary}.{ext}"))); }
+            }
+            candidates
+        }).find(|p| p.is_file())
+    }).ok_or(format!("{provider} CLI not found in PATH"))?;
+    let mut command = tokio::process::Command::new(executable);
+    command.args(args).current_dir(root).stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let stop = Arc::new(tokio::sync::Notify::new());
+    {
+        let state = app.state::<RunningRequests>();
+        state.0.lock().map_err(|_| "Request state unavailable")?.insert(request_id.into(), stop.clone());
+    }
+    let result = async {
+        let child = command.spawn().map_err(|_| format!("Could not start {provider} CLI"))?;
+        let output = tokio::select! {
+            output = tokio::time::timeout(std::time::Duration::from_secs(600), child.wait_with_output()) => {
+                output.map_err(|_| "Agent timed out".to_string())?.map_err(|_| "Agent process failed".to_string())?
+            },
+            _ = stop.notified() => return Err("Request cancelled".into()),
+        };
+        if !output.status.success() { return Err(format!("{provider} CLI returned an error. Check authentication and CLI permissions.")); }
+        if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let answer = if provider == "gemini" {
+            serde_json::from_str::<serde_json::Value>(&text).ok()
+                .and_then(|v| v.get("response").and_then(|r| r.as_str()).map(str::to_owned))
+                .unwrap_or_else(|| text.to_string())
+        } else { text.to_string() };
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"result","provider":provider,"model":"CLI default","answer":answer,"usage":{}
+        }}));
+        Ok(())
+    }.await;
+    if let Ok(mut requests) = app.state::<RunningRequests>().0.lock() { requests.remove(request_id); }
+    result
+}
+
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
-    if !["claude", "codex", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
+    if !["claude", "codex", "gemini", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
     if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
     if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
     let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
+    if ["gemini", "opencode", "copilot"].contains(&provider.as_str()) {
+        let result = run_external_provider(&app, &request_id, &path, &provider, &prompt, &permission).await;
+        if let Err(ref message) = result {
+            let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{"kind":"process_error","message":message}}));
+        }
+        return result;
+    }
     let mut child = tokio::process::Command::new(aam_executable()?);
     child.env("AAM_PERMISSION_MODE", &permission);
     child.arg(&provider).arg("--root").arg(&path).arg("--desktop-jsonl")
