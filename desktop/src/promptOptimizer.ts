@@ -38,7 +38,7 @@ export function followupContext(text:string, previous?:string):string {
 export type Strategy = 'concise'|'balanced'|'detailed';
 export type Analysis = {kind:string; clarity:number; missing:string[]; relevantFiles:string[]; instructions:string[]; estimate:number; suggestion:string; unchanged:boolean};
 const patterns: [string,RegExp][] = [
- ['bug',/\b(fix|bug|crash|error|broken|poprav|grešk|gresk|ne radi|puca)\b/i],
+ ['bug',/\b(fix|bug|crash|error|broken|failing|failed|poprav|grešk|gresk|ne radi|puca)\b/i],
  ['feature',/\b(implement|add|create|build|dodaj|napravi|implementir)\b/i],
  ['refactor',/\b(refactor|cleanup|restructure|refakt|očisti|ocisti)\b/i],
  ['review',/\b(review|audit|security|analiz|proveri|provjeri|pregled)\b/i],
