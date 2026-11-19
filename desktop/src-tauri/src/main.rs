@@ -564,7 +564,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             let mut lines = BufReader::new(stderr).lines();
             let mut diagnostic = String::new();
             while let Ok(Some(line)) = lines.next_line().await {
-                if diagnostic.len() < 8192 { diagnostic.push_str(&line); diagnostic.push('\\n'); }
+                if diagnostic.len() < 8192 { diagnostic.push_str(&line); diagnostic.push('\n'); }
             }
             diagnostic
         });
@@ -574,7 +574,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
                 if answer.len() + line.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
                 answer.push_str(&line);
-                answer.push('\\n');
+                answer.push('\n');
                 // External CLIs emit plain-text output; stream each line as it arrives.
                 let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
                     "kind":"activity","event":{"type":"external.output","provider":provider,"text":line}
