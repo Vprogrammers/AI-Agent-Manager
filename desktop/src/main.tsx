@@ -265,7 +265,7 @@ function App() {
   const [limitNotice, setLimitNotice] = React.useState('');
   const [activity, setActivity] = React.useState('');
   const [agentSteps, setAgentSteps] = React.useState<AgentStep[]>([]);
-  const [showSteps, setShowSteps] = React.useState(true);
+  const [showSteps, setShowSteps] = React.useState(false);
   const [timing, setTiming] = React.useState<{provider:string;preflightMs:number;executionMs:number;totalMs:number}|null>(null);
   const [flowTrace, setFlowTrace] = React.useState<{validationMs:number;gitMs:number;routingMs:number;authMs:number;fingerprintMs:number;preExecutionMs:number;frontendElapsedMs:number;bridgeMs:number}|null>(null);
   const [cliPhases, setCliPhases] = React.useState<{provider:string;setupMs:number;spawnMs:number;firstOutputMs:number|null;processMs:number;exitCode:number|null}|null>(null);
