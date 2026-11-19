@@ -358,6 +358,20 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
     Ok(())
 }
 
+// Only Linux bubblewrap is supported for third-party CLI execution.
+// Never fall back to an unsandboxed subprocess when the sandbox is unavailable.
+fn external_sandbox_ready(permission: &str) -> bool {
+    cfg!(target_os = "linux") && permission == "workspace-write" && cli_on_path("bwrap")
+}
+
+fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), String> {
+    if !external_sandbox_ready(permission) {
+        return Err("External agents require Linux bubblewrap with workspace-write permission; execution blocked on this platform".into());
+    }
+    if !cli_on_path(provider) { return Err(format!("{provider} CLI not installed")); }
+    Ok(())
+}
+
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
         "gemini" => ("gemini", vec!["-p", prompt, "--output-format", "json"]),
@@ -365,10 +379,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         "copilot" => ("copilot", vec!["-p", prompt, "-s", "--no-ask-user"]),
         _ => return Err("Unsupported provider".into()),
     };
-    // Do not silently grant full filesystem or shell access to new providers.
-    if permission != "workspace-write" {
-        return Err("This provider currently supports workspace-write only. Read-only sandboxing and full-access approval are not implemented.".into());
-    }
+    external_provider_preflight(provider, permission)?;
     let executable = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).flat_map(|p| {
             let mut candidates = vec![p.join(binary)];
@@ -378,8 +389,15 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             candidates
         }).find(|p| p.is_file())
     }).ok_or(format!("{provider} CLI not found in PATH"))?;
-    let mut command = tokio::process::Command::new(executable);
-    command.args(args).current_dir(root).stdin(std::process::Stdio::null())
+    // Read-only host filesystem, writable selected workspace, private /tmp and /proc.
+    // No privilege escalation; do not expose the host filesystem as writable.
+    let mut command = tokio::process::Command::new("bwrap");
+    command.args(["--die-with-parent", "--unshare-pid", "--new-session",
+        "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
+        "--proc", "/proc", "--tmpfs", "/tmp", "--bind"])
+        .arg(root).arg(root).arg("--chdir").arg(root)
+        .arg("--").arg(executable).args(args)
+        .current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let stop = Arc::new(tokio::sync::Notify::new());
     {
@@ -480,6 +498,13 @@ mod routing_tests {
         assert_eq!(classify_agent_error("Compilation failed"), "unknown");
     }
     #[test]
+    fn external_sandbox_rejects_unsupported_permissions() {
+        use super::external_sandbox_ready;
+        assert!(!external_sandbox_ready("read-only"));
+        assert!(!external_sandbox_ready("full-access"));
+    }
+
+    #[test]
     fn cooldown_excludes_provider_until_expiry() {
         use super::{ProviderCooldowns, provider_available, set_provider_cooldown};
         let cooldowns = ProviderCooldowns::default();
@@ -561,6 +586,8 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         let mut chosen = None;
         for candidate in candidates {
             if !cli_on_path(candidate) || !provider_available(candidate, &cooldowns) { continue; }
+            if ["gemini", "opencode", "copilot"].contains(&candidate)
+                && external_provider_preflight(candidate, &permission).is_err() { continue; }
             // A missing bundled engine is a pre-execution failure: safely try another CLI.
             if ["claude", "codex"].contains(&candidate) && aam_executable().is_err() { continue; }
             if verified_auth_probe(candidate).await == Some(false) { continue; }
