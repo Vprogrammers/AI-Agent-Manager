@@ -48,6 +48,18 @@ class LatencyRegressionTests(unittest.TestCase):
         self.assertIsNone(sample["first_stdout_ms"])
         self.assertGreater(sample["stderr_bytes"], 0)
 
+    def test_stderr_first_byte_is_measured_separately(self):
+        command = [sys.executable, "-u", "-c",
+                   "import sys,time; sys.stderr.write('START\\\\n'); sys.stderr.flush(); "
+                   "time.sleep(.15); print('READY',flush=True)"]
+        sample = bench.measure(command, Path.cwd(), 5)
+        self.assertEqual(sample["exit_code"], 0)
+        self.assertIsNotNone(sample["first_stderr_ms"])
+        self.assertIsNotNone(sample["first_stdout_ms"])
+        self.assertGreaterEqual(
+            sample["first_stdout_ms"] - sample["first_stderr_ms"], 100
+        )
+
     def test_large_stderr_does_not_deadlock_stdout(self):
         command = [sys.executable, "-u", "-c",
                    "import sys; sys.stderr.write('e'*200000); sys.stderr.flush(); print('OK',flush=True)"]
