@@ -1,0 +1,32 @@
+name: Prompt optimizer checks
+on:
+  push:
+    branches: [feature/multi-agent-providers]
+    paths:
+      - 'desktop/src/**'
+      - 'desktop/package.json'
+      - 'desktop/package-lock.json'
+      - '.github/workflows/prompt-optimizer.yml'
+  pull_request:
+    paths:
+      - 'desktop/src/**'
+      - 'desktop/package.json'
+      - 'desktop/package-lock.json'
+      - '.github/workflows/prompt-optimizer.yml'
+  workflow_dispatch:
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx --yes tsx src/promptOptimizer.test.ts
