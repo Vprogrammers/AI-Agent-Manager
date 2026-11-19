@@ -400,7 +400,7 @@ fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), 
     if !["read-only", "workspace-write", "full-access"].contains(&permission) {
         return Err("Invalid permission mode".into());
     }
-    if !cli_on_path(adapter.id) { return Err(format!("{} CLI not installed", adapter.id)); }
+    if !cli_on_path(if adapter.id == "antigravity" { "agy" } else { adapter.id }) { return Err(format!("{} CLI not installed", adapter.id)); }
     if !external_sandbox_ready(permission) {
         return Err("OS sandbox unavailable for requested permission".into());
     }
@@ -448,7 +448,7 @@ fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), S
     if !external_sandbox_ready(permission) {
         return Err("No supported OS sandbox for this permission mode; execution blocked".into());
     }
-    if !cli_on_path(provider) { return Err(format!("{provider} CLI not installed")); }
+    if !cli_on_path(if provider == "antigravity" { "agy" } else { provider }) { return Err(format!("{provider} CLI not installed")); }
     Ok(())
 }
 
@@ -598,11 +598,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         }
         if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
         let text = String::from_utf8_lossy(&output.stdout);
-        let answer = if false {
-            serde_json::from_str::<serde_json::Value>(&text).ok()
-                .and_then(|v| v.get("response").and_then(|r| r.as_str()).map(str::to_owned))
-                .unwrap_or_else(|| text.to_string())
-        } else { text.to_string() };
+        let answer = text.to_string();
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"result","provider":provider,"model":"CLI default","answer":answer,"usage":{}
         }}));
