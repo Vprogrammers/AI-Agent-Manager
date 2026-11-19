@@ -749,6 +749,15 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
 // A failure is replay-safe only if it happened before the agent process started.
 // Runtime errors are deliberately not eligible: even read-only prompts can
 // invoke external tools with side effects.
+fn retry_after_failure(automatic: bool, permission: &str, error: &str) -> bool {
+    if !automatic { return false; }
+    if retry_before_spawn(error) { return true; }
+    permission == "read-only"
+        && error != "Request cancelled"
+        && error != "Request stopped by user"
+        && !error.contains("timed out")
+}
+
 fn retry_before_spawn(error: &str) -> bool {
     error.starts_with("PRESTART:")
 }
@@ -764,6 +773,17 @@ mod execution_fallback_tests {
             assert!(!retry_before_spawn(message));
         }
     }
+    #[test]
+    fn runtime_fallback_requires_read_only_and_auto_mode() {
+        use super::retry_after_failure;
+        assert!(retry_after_failure(true, "read-only", "CLI failed"));
+        assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
+        assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
+        assert!(!retry_after_failure(false, "read-only", "CLI failed"));
+        assert!(!retry_after_failure(true, "read-only", "Request cancelled"));
+        assert!(!retry_after_failure(true, "read-only", "Request timed out after 10 minutes"));
+    }
+
 }
 
 async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, adapter: ProviderAdapter, prompt: &str, permission: &str) -> Result<(), String> {
@@ -827,20 +847,11 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         // An adapter that has started may have modified files or emitted effects.
         // Never replay such a task automatically, even if it reports a rate limit.
         match execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await {
-            Err(message) if automatic && retry_before_spawn(&message) => {
-                last_preflight_error = message;
-                continue;
-            }
-            // A failed read-only run may be retried with another agent.
-            // Write-capable runs are never replayed after launch.
-            Err(message) if automatic && permission == "read-only"
-                && message != "Request cancelled"
-                && message != "Request stopped by user"
-                && !message.contains("timed out") => {
+            Err(message) if retry_after_failure(automatic, &permission, &message) => {
                 last_preflight_error = message;
                 let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
                     "kind":"routing","provider":candidate,
-                    "reason":"Read-only execution failed; trying next available provider"
+                    "reason":"Execution failed; trying next available provider"
                 }}));
                 continue;
             }
