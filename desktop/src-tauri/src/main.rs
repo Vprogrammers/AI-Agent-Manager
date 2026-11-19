@@ -463,6 +463,16 @@ mod routing_tests {
     }
 }
 
+// Rate-limit cooldowns are process-local. They never imply that a failed edit is safe to replay.
+#[derive(Default)]
+struct ProviderCooldowns(Mutex<HashMap<String, std::time::Instant>>);
+
+fn provider_available(id: &str, cooldowns: &ProviderCooldowns) -> bool {
+    let Ok(mut limits) = cooldowns.0.lock() else { return false; };
+    limits.retain(|_, until| *until > std::time::Instant::now());
+    !limits.contains_key(id)
+}
+
 fn cli_on_path(binary: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|dir| {
@@ -484,8 +494,10 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
     let selected = if provider == "auto" || provider == "balanced" {
         let candidates = route_candidates(&prompt, &provider, &permission);
-        let chosen = candidates.into_iter().find(|id| cli_on_path(id))
-            .ok_or("No compatible agent CLI is installed for the requested permission mode")?;
+        let cooldowns = app.state::<ProviderCooldowns>();
+        let chosen = candidates.into_iter()
+            .find(|id| cli_on_path(id) && provider_available(id, &cooldowns))
+            .ok_or("No compatible agent CLI is available for the requested permission mode")?;
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"routing","reason":format!("Task-based routing selected {chosen}; available CLI detected"),"model":"CLI default"
         }}));
@@ -629,6 +641,7 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
+        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
