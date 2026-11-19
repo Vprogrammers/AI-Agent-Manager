@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
 from codex_profiles import choose_profile, profile_environment
-from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, compact_history, write_checkpoint, load_checkpoint
+from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, rotation_handoff, compact_history, write_checkpoint, load_checkpoint
 from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
 from aam_tui import RichTurn, rich_available, provider_model
 from smart_router import route as smart_route
@@ -285,7 +285,8 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
     sid = cache_policy(state, tool, profile, prompt, env)
     previous = state.get('last_tool')
     switched = previous is not None and previous != tool
-    actual_prompt = (handoff(root, state, tool) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else prompt
+    rotated = not switched and sid is None and bool(sessions.get(session_key))
+    actual_prompt = (handoff(root, state, tool) + '\n\nNEW USER REQUEST:\n' + prompt) if switched else (rotation_handoff(state, tool, prompt) if rotated else prompt)
     model = model_for_session(state, session_key, sid, model_for(tool, prompt, env))
     cmd = build_command(tool, model, sid, actual_prompt)
     before = repository_snapshot(root) if tool == 'claude' else None
@@ -300,6 +301,8 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
     state['last_usage'] = usage
+    if usage.get('input_tokens') is not None:
+        state.setdefault('session_input_tokens', {})[session_key] = usage['input_tokens']
     try:
         usage_diagnostics(root, tool, completed.stdout, bool(sid), usage)
     except OSError as exc:
