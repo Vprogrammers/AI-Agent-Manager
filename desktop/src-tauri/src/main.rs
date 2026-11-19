@@ -728,7 +728,25 @@ fn cli_on_path(binary: &str) -> bool {
     find_cli(binary).is_some()
 }
 
+// Cache successful CLI authentication probes for one minute. Failed probes are
+// never cached; provider execution still performs its own authentication checks.
+static AUTH_PROBE_CACHE: std::sync::OnceLock<Mutex<HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+
+fn cached_auth_ok(provider: &str) -> bool {
+    let cache = AUTH_PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    cache.lock().ok().and_then(|items| items.get(provider).copied())
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(60))
+}
+
+fn remember_auth_ok(provider: &str) {
+    let cache = AUTH_PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut items) = cache.lock() {
+        items.insert(provider.to_owned(), std::time::Instant::now());
+    }
+}
+
 async fn verified_auth_probe(provider: &str) -> Option<bool> {
+    if cached_auth_ok(provider) { return Some(true); }
     let args: &[&str] = match provider {
         "claude" => &["auth", "status"],
         "codex" => &["login", "status"],
@@ -739,7 +757,9 @@ async fn verified_auth_probe(provider: &str) -> Option<bool> {
         tokio::process::Command::new(provider).args(args)
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()).kill_on_drop(true).status()).await;
-    Some(matches!(result, Ok(Ok(status)) if status.success()))
+    let authenticated = matches!(result, Ok(Ok(status)) if status.success());
+    if authenticated { remember_auth_ok(provider); }
+    Some(authenticated)
 }
 
 #[tauri::command]
@@ -975,6 +995,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
+    let request_started = std::time::Instant::now();
     let automatic = provider == "auto" || provider == "balanced";
     let candidates: Vec<&str> = if automatic {
         route_candidates(&prompt, &provider, &permission)
@@ -992,10 +1013,12 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             last_preflight_error = message;
             continue;
         }
+        let preflight_started = std::time::Instant::now();
         if verified_auth_probe(candidate).await == Some(false) {
             last_preflight_error = format!("{candidate} requires authentication");
             continue;
         }
+        let preflight_ms = preflight_started.elapsed().as_millis();
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"routing","reason":format!("Executing {candidate}; preflight passed"),
             "provider":candidate,"model":"CLI default"
@@ -1007,7 +1030,15 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             handoff_prompt.as_str()
         } else { prompt.as_str() };
         let before = workspace_fingerprint(&path)?;
-        match execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await {
+        let execution_started = std::time::Instant::now();
+        let outcome = execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await;
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"timing","provider":candidate,
+            "preflightMs":preflight_ms,
+            "executionMs":execution_started.elapsed().as_millis(),
+            "totalMs":request_started.elapsed().as_millis()
+        }}));
+        match outcome {
             Err(message) if retry_after_failure(automatic, &permission, &message) => {
                 if message.contains("rate limit detected") {
                     let after = workspace_fingerprint(&path)?;
