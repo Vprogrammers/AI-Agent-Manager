@@ -87,3 +87,10 @@ article.assistant.provider-codex{border-left-color:#35b9ad}
 article.assistant.provider-antigravity{border-left-color:#9a8de2}
 article.assistant.provider-opencode{border-left-color:#7ca7e4}
 article.assistant.provider-copilot{border-left-color:#b3a1d7}
+
+/* Keep prompt suggestions usable on compact windows and short displays. */
+footer.composer{min-height:0;min-width:0;flex-shrink:0;max-height:75dvh;overflow-y:auto;overscroll-behavior:contain;align-items:flex-end;flex-wrap:wrap}
+footer.composer .prompt-suggestion{flex:1 1 100%;min-width:0;max-height:calc(75dvh - 100px);overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+footer.composer .prompt-suggestion textarea{max-height:min(28dvh,220px);min-height:80px;resize:vertical}
+footer.composer>.send-button{flex-shrink:0}
+@media(max-height:550px){footer.composer{max-height:85dvh}footer.composer .prompt-suggestion{max-height:calc(85dvh - 90px)}}
