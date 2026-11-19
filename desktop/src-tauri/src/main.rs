@@ -383,7 +383,7 @@ fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), 
         return Err("Invalid permission mode".into());
     }
     if !cli_on_path(if adapter.id == "antigravity" { "agy" } else { adapter.id }) { return Err(format!("{} CLI not installed", adapter.id)); }
-    if !external_sandbox_ready(permission) {
+    if permission != "full-access" && !external_sandbox_ready(permission) {
         return Err("OS sandbox unavailable for requested permission".into());
     }
     match adapter.transport {
@@ -427,7 +427,7 @@ fn external_sandbox_ready(permission: &str) -> bool {
 }
 
 fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), String> {
-    if !external_sandbox_ready(permission) {
+    if permission != "full-access" && !external_sandbox_ready(permission) {
         return Err("No supported OS sandbox for this permission mode; execution blocked".into());
     }
     if !cli_on_path(if provider == "antigravity" { "agy" } else { provider }) { return Err(format!("{provider} CLI not installed")); }
@@ -472,6 +472,12 @@ fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String
 // One platform isolation policy for both engine and direct CLI transports.
 // On unsupported platforms, never silently launch an unrestricted child.
 fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &str) -> Result<tokio::process::Command, String> {
+    // Full access is an explicit user-approved opt-out of the OS sandbox.
+    if permission == "full-access" {
+        let mut command = tokio::process::Command::new(executable);
+        command.args(args).current_dir(root);
+        return Ok(command);
+    }
     #[cfg(target_os = "linux")]
     {
         if !cli_on_path("bwrap") { return Err("bubblewrap unavailable".into()); }
@@ -735,7 +741,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let mut child = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
     // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
-    child.env("AAM_OUTER_SANDBOX", "1");
+    if permission != "full-access" { child.env("AAM_OUTER_SANDBOX", "1"); } else { child.env_remove("AAM_OUTER_SANDBOX"); }
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
     #[cfg(unix)]
