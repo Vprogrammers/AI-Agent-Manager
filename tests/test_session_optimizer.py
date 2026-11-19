@@ -27,6 +27,13 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(cache_policy(state, 'codex', 'coding', 'hello', {}), 'abc')
         self.assertIsNone(cache_policy(state, 'codex', 'coding', 'hello', {'AAM_FORCE_NEW_SESSION': '1'}))
 
+    def test_standalone_git_status_never_resumes_native_session(self):
+        state = {'sessions': {'codex:coding': 'huge-old-session'}}
+        self.assertIsNone(cache_policy(state, 'codex', 'coding', 'git status -sb', {}))
+        self.assertIsNone(cache_policy(state, 'codex', 'coding', 'proveri git status -sb', {}))
+        self.assertEqual(cache_policy(state, 'codex', 'coding', 'continue previous work', {}),
+                         'huge-old-session')
+
     def test_rotates_oversized_session(self):
         state = {'sessions': {'codex:coding': 'old'}, 'session_input_tokens': {'codex:coding': 707181}}
         self.assertIsNone(cache_policy(state, 'codex', 'coding', 'git status -sb', {}))
