@@ -85,7 +85,7 @@ export default function AgentSetupWizard() {
       const [runtime, items] = await Promise.all([invoke<NodeStatus>('node_setup_status'), invoke<ProviderStatus[]>('provider_setup_status')]);
       setNode(runtime);
       setStatuses(items);
-      if (!dismissed && !items.some(item => item.authenticated)) setOpen(true);
+      if (!dismissed && items.every(item => !item.installed || item.authStatus === 'login_required')) setOpen(true);
     } catch (e) {
       setError(String(e));
       setOpen(true);
@@ -119,7 +119,7 @@ export default function AgentSetupWizard() {
     setTerminalInput('');
   };
   const ready = statuses.some(item => item.authenticated);
-  const needsSetup = statuses.some(item => !item.authenticated);
+  const needsSetup = statuses.some(item => !item.installed || item.authStatus === 'login_required');
   const installNode = async () => {
     if (!window.confirm('Install Node.js and npm using ' + (node?.installer || 'the OS package manager') + '? This downloads software and may request administrator authorization.')) return;
     setWorking('node'); setError(''); setNotice('');
@@ -224,18 +224,18 @@ export default function AgentSetupWizard() {
             const installed = item?.installed;
             const authenticated = item?.authenticated;
             return <div className="setup-provider" key={id}>
-              <h3>{guide.name} <span className={authenticated ? 'setup-ready' : 'setup-needed'}>{authenticated ? 'Ready' : !installed ? 'Not installed' : item?.authStatus === 'unknown' ? 'Auth unverified' : 'Sign in required'}</span></h3>
+              <h3>{guide.name} <span className={authenticated ? 'setup-ready' : item?.authStatus === 'unknown' && installed ? 'setup-ready' : 'setup-needed'}>{authenticated ? 'Ready · verified' : !installed ? 'Not installed' : item?.authStatus === 'unknown' ? 'CLI detected · auth unknown' : 'Sign in required'}</span></h3>
               {!installed && <div><p>1. Install the CLI:</p><button type="button" disabled={!!working || !node?.installed || id === "antigravity"} onClick={() => void perform(id, "install")}>{working === id ? "Installing…" : id === "antigravity" ? "Use manual installer below" : "Install automatically"}</button><details><summary>Manual alternative</summary><code>{guide.install}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.install)}>Copy</button></details></div>}
-              {installed && !authenticated && <div><p>2. Authenticate using the provider browser flow:</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>Open login</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
+              {installed && !authenticated && <div><p>{item?.authStatus === 'unknown' ? 'Already signed in? You can use this agent. Login is optional unless execution reports an authentication error.' : 'Authentication required:'}</p><button type="button" disabled={!!working} onClick={() => void perform(id, "login")}>{item?.authStatus === 'unknown' ? 'Sign in / switch account' : 'Open login'}</button><details><summary>Manual alternative</summary><code>{guide.login}</code><button type="button" onClick={() => void navigator.clipboard.writeText(guide.login)}>Copy</button></details></div>}
               {authenticated && <p>CLI installed and authentication confirmed.</p>}
-              {installed && item?.authStatus === 'unknown' && <p className="hint">Authentication is not independently verified for this provider. Complete the provider login flow and check its own account status. The app will not claim Ready without verification.</p>}
+              {installed && item?.authStatus === 'unknown' && <p className="hint">This CLI does not expose a reliable authentication check to AAM. AAM has not determined whether you are signed in. You can try running the agent; an authentication error will be reported if it occurs.</p>}
               <p className="hint">{item?.detail || 'Checking CLI status…'} · <a href={guide.docs} target="_blank" rel="noopener noreferrer">Official setup guide</a></p>
             </div>;
           })}
         </div>
         <div className="setup-actions">
           <button type="button" onClick={() => void refresh()} disabled={checking}>{checking ? 'Checking…' : 'Recheck installation and login'}</button>
-          <button type="button" onClick={() => { setDismissed(true); setOpen(false); }}>{ready ? 'Continue' : 'Skip for now'}</button>
+          <button type="button" onClick={() => { setDismissed(true); setOpen(false); }}>{statuses.some(item => item.installed) ? 'Continue' : 'Skip for now'}</button>
         </div>
         <p className="hint">Node.js is installed using the OS package manager after confirmation. Most CLI installations use npm; Antigravity requires its official installer. After CLI installation, the app starts an embedded interactive terminal and checks authentication automatically. Provider OAuth may require your default browser. Credentials remain with the provider CLI. Restart the app if PATH changed, then recheck.</p>
       </section>
