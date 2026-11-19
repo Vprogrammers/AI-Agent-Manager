@@ -1227,7 +1227,9 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             "gitValidationMs":git_validation_ms,
             "routingMs":routing_ms,
             "fingerprintMs":fingerprint_ms,
-            "backendElapsedMs":end_to_end_started.elapsed().as_millis()
+            "backendElapsedMs":end_to_end_started.elapsed().as_millis(),
+            "validationMs":workspace_validation_ms + git_validation_ms,
+            "preExecutionMs":end_to_end_started.elapsed().as_millis().saturating_sub(execution_started.elapsed().as_millis())
         }}));
         match outcome {
             Err(message) if retry_after_failure(automatic, &permission, &message) => {
