@@ -960,6 +960,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
     let mut child = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
+    if provider == "claude" { child.env("AAM_DESKTOP_STREAM", "1"); }
     // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
     if permission != "full-access" { child.env("AAM_OUTER_SANDBOX", "1"); } else { child.env_remove("AAM_OUTER_SANDBOX"); }
     child.stdout(std::process::Stdio::piped())
