@@ -1,0 +1,103 @@
+name: Desktop release installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.3.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  installers:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            os: macos-15
+            bundles: dmg
+          - name: macOS Intel
+            os: macos-15-intel
+            bundles: dmg
+          - name: Windows
+            os: windows-2022
+            bundles: nsis
+          - name: Linux
+            os: ubuntu-24.04
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - name: Check release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          test "$RELEASE_TAG" = "v$(python3 -c 'import json; print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
+          test "$RELEASE_TAG" = "v$(python3 -c 'import json; print(json.load(open("desktop/package.json"))["version"])')"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux Tauri prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm install --no-package-lock
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
+      - name: Generate application icons
+        working-directory: desktop
+        run: npm run icons
+      - name: Build installers
+        working-directory: desktop
+        shell: bash
+        env:
+          BUNDLES: ${{ matrix.bundles }}
+        run: npm run tauri build -- --bundles "$BUNDLES"
+      - name: Collect release installers
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          root = Path('desktop/src-tauri/target/release/bundle')
+          suffixes = ('.dmg', '.exe', '.msi', '.deb', '.AppImage')
+          files = [p for p in root.rglob('*') if p.is_file() and p.name.endswith(suffixes)]
+          if not files:
+              raise SystemExit('No installer files produced')
+          for p in files:
+              dest = Path('release-assets') / p.name
+              if dest.exists():
+                  raise SystemExit(f'Duplicate asset filename: {p.name}')
+              shutil.copy2(p, dest)
+              print(dest)
+          PY
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.name }}
+          path: release-assets/*
+          if-no-files-found: error
+      - name: Attach installers to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release upload "$RELEASE_TAG" release-assets/* --clobber
