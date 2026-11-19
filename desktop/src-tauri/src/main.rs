@@ -101,6 +101,235 @@ fn desktop_diagnostics(root: String) -> Vec<Diagnostic> {
     result
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeSetup {
+    installed: bool,
+    detail: String,
+    installer: String,
+}
+
+#[tauri::command]
+async fn node_setup_status() -> NodeSetup {
+    let node = tokio::time::timeout(std::time::Duration::from_secs(5),
+        tokio::process::Command::new("node").arg("--version")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()).await;
+    let npm_bin = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let npm = tokio::time::timeout(std::time::Duration::from_secs(5),
+        tokio::process::Command::new(npm_bin).arg("--version")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()).await;
+    let installed = matches!(node, Ok(Ok(ref s)) if s.success()) &&
+        matches!(npm, Ok(Ok(ref s)) if s.success());
+    let installer = if cfg!(windows) { "winget (OpenJS.NodeJS.LTS)" }
+        else if cfg!(target_os = "macos") { "Homebrew (node)" }
+        else { "apt/dnf/pacman via polkit (supported Linux distributions)" };
+    NodeSetup { installed, detail: if installed { "Node.js and npm available".into() }
+        else { "Node.js or npm missing from application PATH".into() }, installer: installer.into() }
+}
+
+#[tauri::command]
+async fn install_node_runtime() -> Result<String, String> {
+    // Only invoke fixed, reviewed package-manager arguments after UI confirmation.
+    // Never interpolate user input or download and execute remote scripts.
+    let mut command;
+    if cfg!(windows) {
+        command = tokio::process::Command::new("winget");
+        command.args(["install", "--id", "OpenJS.NodeJS.LTS", "--exact",
+            "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"]);
+    } else if cfg!(target_os = "macos") {
+        command = tokio::process::Command::new("brew");
+        command.args(["install", "node"]);
+    } else if cfg!(target_os = "linux") {
+        // pkexec shows an OS-controlled authorization dialog when elevation is needed.
+        if std::path::Path::new("/usr/bin/apt-get").exists() {
+            command = tokio::process::Command::new("pkexec");
+            command.args(["/usr/bin/apt-get", "install", "-y", "nodejs", "npm"]);
+        } else if std::path::Path::new("/usr/bin/dnf").exists() {
+            command = tokio::process::Command::new("pkexec");
+            command.args(["/usr/bin/dnf", "install", "-y", "nodejs", "npm"]);
+        } else if std::path::Path::new("/usr/bin/pacman").exists() {
+            command = tokio::process::Command::new("pkexec");
+            command.args(["/usr/bin/pacman", "-S", "--noconfirm", "nodejs", "npm"]);
+        } else {
+            return Err("No supported Linux package manager found (apt, dnf, pacman).".into());
+        }
+    } else {
+        return Err("Unsupported operating system".into());
+    }
+    command.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).kill_on_drop(true);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(600), command.status())
+        .await.map_err(|_| "Node.js installation timed out".to_string())?
+        .map_err(|_| "Package manager unavailable. On macOS install Homebrew; on Windows install winget; on Linux install polkit.".to_string())?;
+    if !status.success() { return Err("Node.js installation failed or authorization was declined. Check package manager and network access.".into()); }
+    Ok("Node.js installer completed. Restart the app if PATH changed, then recheck.".into())
+}
+
+// Installation is initiated only by an explicit user click. No shell interpolation,
+// elevated privileges, or credentials are handled by the application.
+#[tauri::command]
+async fn install_provider_cli(provider: String) -> Result<String, String> {
+    let package = match provider.as_str() {
+        "claude" => "@anthropic-ai/claude-code",
+        "codex" => "@openai/codex",
+        _ => return Err("Unsupported provider".into()),
+    };
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let mut child = tokio::process::Command::new(npm);
+    child.args(["install", "--global", package, "--no-audit", "--no-fund"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(180), child.output())
+        .await.map_err(|_| "Installation timed out (3 minutes)".to_string())?
+        .map_err(|_| "Node.js/npm is not available. Install Node.js LTS first.".to_string())?;
+    if !output.status.success() {
+        // Never return npm stderr: it may contain registry tokens or private paths.
+        return Err("CLI installation failed. Check npm permissions and registry connectivity.".into());
+    }
+    Ok(format!("{provider} CLI installation completed. Recheck status; restart the app if PATH changed."))
+}
+
+// Interactive provider login runs in a real PTY embedded in the setup UI.
+// OAuth browser redirects are left to the provider CLI and system browser:
+// third-party identity providers may prohibit embedded webviews.
+type LoginWriter = Box<dyn std::io::Write + Send>;
+#[derive(Default)]
+struct LoginSession(Mutex<Option<LoginWriter>>);
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LoginOutput { text: String, finished: bool }
+
+#[tauri::command]
+fn focus_after_login(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("Main window unavailable")?;
+    if window.is_minimized().unwrap_or(false) {
+        window.unminimize().map_err(|e| e.to_string())?;
+    }
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn login_pty_write(input: String, state: tauri::State<'_, LoginSession>) -> Result<(), String> {
+    if input.len() > 4096 { return Err("Input too long".into()); }
+    let mut session = state.0.lock().map_err(|_| "Login session unavailable")?;
+    let writer = session.as_mut().ok_or("No active login session")?;
+    use std::io::Write;
+    writer.write_all(input.as_bytes()).map_err(|_| "Unable to send login input".to_string())?;
+    writer.flush().map_err(|_| "Unable to flush login input".to_string())
+}
+
+#[tauri::command]
+fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::State<'_, LoginSession>) -> Result<String, String> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    let (binary, args): (&str, &[&str]) = match provider.as_str() {
+        "claude" => ("claude", &["auth", "login"]),
+        "codex" => ("codex", &["login"]),
+        _ => return Err("Unsupported provider".into()),
+    };
+    let executable = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).flat_map(|p| {
+            let mut candidates = vec![p.join(binary)];
+            if cfg!(windows) {
+                for ext in ["exe", "cmd", "bat"] { candidates.push(p.join(format!("{binary}.{ext}"))); }
+            }
+            candidates
+        }).find(|p| p.is_file())
+    }).ok_or("Provider CLI not found. Recheck installation first.")?;
+    let pty = native_pty_system().openpty(PtySize {
+        rows: 24, cols: 100, pixel_width: 0, pixel_height: 0
+    }).map_err(|_| "Could not create interactive login terminal".to_string())?;
+    let mut cmd = CommandBuilder::new(executable);
+    for arg in args { cmd.arg(arg); }
+    let mut child = pty.slave.spawn_command(cmd).map_err(|_| "Could not launch provider login".to_string())?;
+    drop(pty.slave);
+    let writer = pty.master.take_writer().map_err(|_| "Could not open login input".to_string())?;
+    let mut reader = pty.master.try_clone_reader().map_err(|_| "Could not open login output".to_string())?;
+    {
+        let mut guard = state.0.lock().map_err(|_| "Login session unavailable")?;
+        if guard.is_some() { let _ = child.kill(); return Err("A login is already in progress".into()); }
+        *guard = Some(writer);
+    }
+    let state_handle = app.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 2048];
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    // Do not persist PTY output; avoid exposing credentials in logs.
+                    let _ = app.emit("provider-login-output", LoginOutput {
+                        text: String::from_utf8_lossy(&buf[..n]).into_owned(), finished: false
+                    });
+                }
+            }
+        }
+        let _ = child.wait();
+        if let Some(session) = state_handle.try_state::<LoginSession>() {
+            if let Ok(mut guard) = session.0.lock() { *guard = None; }
+        }
+        let _ = app.emit("provider-login-output", LoginOutput { text: String::new(), finished: true });
+    });
+    Ok("Interactive login started inside the application. Complete provider browser authorization if prompted.".into())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderSetup {
+    id: String,
+    installed: bool,
+    authenticated: bool,
+    auth_status: String,
+    detail: String,
+}
+
+#[tauri::command]
+async fn provider_setup_status() -> Vec<ProviderSetup> {
+    let mut result = Vec::new();
+    for (id, binary, args) in [
+        ("claude", "claude", vec!["auth", "status"]),
+        ("codex", "codex", vec!["login", "status"]),
+    ] {
+        let executable = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths).flat_map(|p| {
+                let mut candidates = vec![p.join(binary)];
+                if cfg!(windows) {
+                    for ext in ["exe", "cmd", "bat"] {
+                        candidates.push(p.join(format!("{binary}.{ext}")));
+                    }
+                }
+                candidates
+            }).find(|p| p.is_file())
+        });
+        let Some(executable) = executable else {
+            result.push(ProviderSetup { id: id.into(), installed: false, authenticated: false,
+                auth_status: "missing".into(), detail: "CLI not found in PATH".into() });
+            continue;
+        };
+        // Never return stdout/stderr: authentication diagnostics may contain private data.
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            tokio::process::Command::new(&executable)
+                .args(&args).stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).kill_on_drop(true).status(),
+        ).await;
+        let (authenticated, auth_status, detail) = match status {
+            Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
+            Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
+            Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
+            Err(_) => (false, "unknown", "Authentication check timed out"),
+        };
+        result.push(ProviderSetup { id: id.into(), installed: true, authenticated,
+            auth_status: auth_status.into(), detail: detail.into() });
+    }
+    result
+}
+
 #[tauri::command]
 fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -> Result<(), String> {
     let requests = state.0.lock().map_err(|_|"Request state unavailable")?;
@@ -249,6 +478,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 
 fn main() {
     configure_agent_path();
-    tauri::Builder::default().manage(RunningRequests::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, cancel_prompt, architect_preview, architect_apply])
+    tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
