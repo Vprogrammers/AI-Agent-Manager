@@ -84,8 +84,14 @@ def measure(command, cwd, timeout):
         timed_out = True
     else:
         timed_out = False
-    out_thread.join(timeout=2)
-    err_thread.join(timeout=2)
+    # The child has exited (or was killed). Readers must finish draining before
+    # their pipes are closed; timed joins could leave readers holding open FDs.
+    try:
+        out_thread.join()
+        err_thread.join()
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
     ended = time.perf_counter()
     stderr = b"".join(errors).decode("utf-8", "replace")
     return {
