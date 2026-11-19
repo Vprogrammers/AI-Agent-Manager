@@ -102,3 +102,12 @@ footer.composer>.send-button{flex-shrink:0}
 .workspace-panel .recent{min-width:0;max-width:100%}
 .workspace-panel .recent button{max-width:100%;overflow-wrap:anywhere}
 .workspace-panel .hint,.workspace-panel .diagnostic-item{overflow-wrap:anywhere}
+
+/* Live agent tool/step timeline in the conversation, without horizontal scrolling. */
+.agent-steps{margin:12px 0 18px;border:1px solid #384653;border-radius:10px;background:#1b232d;overflow:hidden}
+.agent-steps-toggle{width:100%;text-align:left;border:0;border-radius:0;background:#263341;font-weight:600;padding:10px 14px}
+.agent-steps-list{margin:0;padding:10px 16px 10px 32px;max-height:240px;overflow-y:auto;overflow-x:hidden}
+.agent-steps-list li{font-size:12px;line-height:1.6;padding:3px 0;color:#bac9d8;overflow-wrap:anywhere}
+.agent-step-time{font-variant-numeric:tabular-nums;color:#8194a7;margin-right:12px}
+.agent-step-running{color:#63d6ca!important}
+.agent-step-done{color:#b3c3d1}
