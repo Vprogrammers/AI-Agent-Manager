@@ -154,6 +154,41 @@ def usage_from_output(tool, output):
     return {}
 
 
+
+def usage_diagnostics(root, tool, output, reused_session, usage):
+    """Record only numeric usage metadata; never store prompts or provider output."""
+    events = []
+    if tool == 'codex':
+        for line in output.splitlines():
+            try:
+                obj = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if obj.get('type') in ('turn.completed', 'turn.failed'):
+                raw = obj.get('usage')
+                events.append({'type': obj['type'], 'usage': {
+                    key: value for key, value in (raw or {}).items()
+                    if key in ('input_tokens', 'cached_input_tokens', 'output_tokens')
+                    and type(value) is int and value >= 0
+                }})
+    entry = {
+        'utc': datetime.now(timezone.utc).isoformat(),
+        'provider': tool,
+        'session_reused': bool(reused_session),
+        'usage_source': 'codex.turn.completed' if tool == 'codex' else 'claude.result',
+        'events': events,
+        'reported_usage': usage,
+        'uncached_input_tokens': max(0, usage['input_tokens'] - usage['cached_input_tokens'])
+            if 'input_tokens' in usage and 'cached_input_tokens' in usage
+            and usage['cached_input_tokens'] <= usage['input_tokens'] else None,
+        'note': 'Provider-reported turn usage; not the number of tokens typed by the user.'
+    }
+    path = store_path(root).with_name('usage-diagnostics.jsonl')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps(entry, ensure_ascii=False) + '\\n')
+
+
 def record_usage(root, tool, model, seconds, usage, status, profile='default', task=None):
     log = store_path(root).with_name('usage.jsonl')
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -265,6 +300,10 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
     state['last_usage'] = usage
+    try:
+        usage_diagnostics(root, tool, completed.stdout, bool(sid), usage)
+    except OSError as exc:
+        print(f'[aam] Usage diagnostics unavailable: {type(exc).__name__}', file=sys.stderr)
     if tool == 'claude':
         try:
             reported_model = provider_model(json.loads(completed.stdout))
