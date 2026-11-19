@@ -622,6 +622,28 @@ where
     }
 }
 
+// Keep actionable CLI diagnostics while withholding lines likely to contain secrets.
+fn safe_provider_diagnostic(stderr: &str) -> String {
+    let mut lines = Vec::new();
+    for line in stderr.lines().rev() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if trimmed.is_empty() || trimmed.len() > 350
+            || ["token", "secret", "password", "authorization", "bearer",
+                "api_key", "apikey", "credential", "cookie", "sk-", "ghp_"]
+                .iter().any(|word| lower.contains(word)) {
+            continue;
+        }
+        // Avoid echoing JSON configuration and user content from CLI failures.
+        if trimmed.starts_with('{') || trimmed.starts_with('[') { continue; }
+        lines.push(trimmed.to_string());
+        if lines.len() == 3 { break; }
+    }
+    lines.reverse();
+    if lines.is_empty() { "No safe CLI error detail available".into() }
+    else { lines.join(" | ") }
+}
+
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
         "antigravity" => ("agy", vec!["--print", prompt]),
@@ -686,7 +708,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             }
             if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
             let exit_code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
-            eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}");
+            eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}, diagnostic={}", safe_provider_diagnostic(&stderr));
             let hint = match (provider, kind) {
                 (_, "sandbox_permission") => "CLI was denied filesystem access. Check provider-specific cache/config permissions in the OS sandbox; do not disable isolation as a permanent workaround.",
                 (_, "model_configuration") => "CLI could not use its configured model/provider. Verify the selected model and provider account.",
@@ -696,7 +718,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
                 ("antigravity", _) => "Antigravity failed. Verify 'agy --print' works non-interactively in the same workspace.",
                 _ => "Provider CLI failed. Check its configuration and permissions.",
             };
-            return Err(format!("{hint} (exit: {exit_code}, category: {kind})"));
+            return Err(format!("{hint} (exit: {exit_code}, category: {kind}). CLI detail: {}", safe_provider_diagnostic(&stderr)));
         }
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"result","provider":provider,"model":"CLI default","answer":answer,"usage":{}
