@@ -112,15 +112,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", choices=["all", *PROVIDERS], default="all")
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=1, help="Unmeasured calls per variant before sampling")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path, default=Path("/tmp/aam-latency-results.json"))
     args = parser.parse_args()
-    if args.runs < 1 or args.timeout < 1:
-        parser.error("--runs and --timeout must be positive")
+    if args.runs < 1 or args.timeout < 1 or args.warmup < 0:
+        parser.error("--runs and --timeout must be positive; --warmup must be nonnegative")
     workspace = args.workspace.resolve()
     providers = list(PROVIDERS) if args.provider == "all" else [args.provider]
-    report = {"workspace": str(workspace), "runs": args.runs, "providers": {}}
+    report = {"workspace": str(workspace), "runs": args.runs, "warmup": args.warmup, "providers": {}}
     for provider in providers:
         if not shutil.which(PROVIDERS[provider](PROMPT)[0]):
             print(f"{provider}: CLI unavailable; skipped", flush=True)
@@ -133,6 +134,10 @@ def main():
         # Interleave variants to reduce bias from CLI warmup and network fluctuations.
         for name in variants:
             results[name] = []
+        for _ in range(args.warmup):
+            for name, cmd in variants.items():
+                warmup_result = measure(cmd, workspace, args.timeout)
+                print(f"{provider} {name} warmup: {warmup_result}", flush=True)
         for iteration in range(args.runs):
             for name, cmd in variants.items():
                 result = measure(cmd, workspace, args.timeout)
