@@ -100,6 +100,7 @@ export default function AgentSetupWizard() {
     } catch (e) { setError(String(e)); }
   };
   const ready = statuses.some(item => item.authenticated);
+  const needsSetup = statuses.some(item => !item.authenticated);
   const installNode = async () => {
     if (!window.confirm('Install Node.js and npm using ' + (node?.installer || 'the OS package manager') + '? This downloads software and may request administrator authorization.')) return;
     setWorking('node'); setError(''); setNotice('');
@@ -166,7 +167,7 @@ export default function AgentSetupWizard() {
 
   return <>
     <button type="button" className="setup-launch" onClick={() => { setOpen(true); void refresh(); }}>
-      Agent setup {checking ? '· checking…' : ready ? '· ready' : '· action required'}
+      Agent setup {checking ? '· checking…' : needsSetup ? '· setup available' : ready ? '· ready' : '· action required'}
     </button>
     {open && <div className="setup-overlay" role="presentation">
       <section className="setup-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title">
@@ -174,7 +175,7 @@ export default function AgentSetupWizard() {
           <div><h2 id="setup-title">Set up AI agents</h2><p className="hint">Install and sign in to an agent CLI. Gemini, OpenCode and Copilot execution support is not yet wired into the AAM engine. No credentials are collected by this app.</p></div>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }} aria-label="Close setup">Close</button>
         </div>
-        {error && <p role="alert" className="error">{error}</p>}
+        {error && <p role="alert" className="error">{error}{error.includes('already in progress') && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setError('Login interruption requested. Retry when the previous session closes.'); } catch (e) { setError(String(e)); } }}>Cancel previous login</button>}</p>}
         {notice && <p role="status" className="hint">{notice}</p>}
         <div className="setup-provider">
           <h3>Node.js + npm <span className={node?.installed ? 'setup-ready' : 'setup-needed'}>{node?.installed ? 'Ready' : 'Required for CLI installation'}</span></h3>
@@ -200,6 +201,7 @@ export default function AgentSetupWizard() {
         {(terminalOpen || terminalOutput) && <div className="setup-provider" aria-label="Embedded provider login terminal">
           <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
           <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
+          {terminalOpen && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setNotice('Login interruption requested. Wait for the terminal to close before retrying.'); } catch (e) { setError(String(e)); } }}>Cancel active login</button>}
           {terminalOpen && <form onSubmit={e => { e.preventDefault(); void sendTerminalInput(); }} className="setup-terminal-input">
             <input aria-label="Terminal input" type="text" value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Enter CLI response, if requested" autoComplete="off" />
             <button type="submit">Send</button>
