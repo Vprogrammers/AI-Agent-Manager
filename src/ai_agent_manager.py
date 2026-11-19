@@ -69,7 +69,14 @@ def build_command(tool, model, session_id, prompt):
             cmd += ['--model', model]
         return cmd + [prompt]
     cmd = ['codex', 'exec']
-    if permission == 'read-only':
+    # The desktop engine already runs inside an OS-enforced sandbox.
+    # A second macOS Seatbelt profile fails with sandbox_apply: EPERM.
+    # Skip Codex's nested sandbox only when the desktop launcher explicitly
+    # confirms that the outer OS sandbox is active.
+    outer_sandbox = os.environ.get('AAM_OUTER_SANDBOX') == '1'
+    if outer_sandbox and permission in ('read-only', 'workspace-write'):
+        cmd += ['--dangerously-bypass-approvals-and-sandbox']
+    elif permission == 'read-only':
         cmd += ['--sandbox', 'read-only']
     elif permission == 'workspace-write':
         cmd += ['--sandbox', 'workspace-write']
