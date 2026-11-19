@@ -517,7 +517,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             candidates
         }).find(|p| p.is_file())
     }).ok_or(format!("{provider} CLI not found in PATH"))?;
-    let mut command = sandbox_command(&executable, &args, root, permission)?;
+    let mut command = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let result = async {
@@ -687,10 +687,10 @@ async fn verified_auth_probe(provider: &str) -> Option<bool> {
 async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     // The AAM engine is isolated by the same OS boundary as external CLIs.
     // Its child processes inherit this sandbox.
-    let executable = aam_executable()?;
+    let executable = aam_executable().map_err(|e| format!("PRESTART: {e}"))?;
     let root_arg = root.to_str().ok_or("Invalid workspace path")?;
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
-    let mut child = sandbox_command(&executable, &args, root, permission)?;
+    let mut child = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
@@ -748,10 +748,9 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
 fn retry_after_failure(automatic: bool, permission: &str, error: &str) -> bool {
     if !automatic { return false; }
     if retry_before_spawn(error) { return true; }
-    permission == "read-only"
-        && error != "Request cancelled"
-        && error != "Request stopped by user"
-        && !error.contains("timed out")
+    // A read-only filesystem does not prevent network or subprocess side effects.
+    // Retry only errors positively identified as occurring before task execution.
+    error.starts_with("PREEXEC:")
 }
 
 fn retry_before_spawn(error: &str) -> bool {
@@ -772,9 +771,10 @@ mod execution_fallback_tests {
     #[test]
     fn runtime_fallback_requires_read_only_and_auto_mode() {
         use super::retry_after_failure;
-        assert!(retry_after_failure(true, "read-only", "CLI failed"));
+        assert!(retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
         assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
         assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
+        assert!(!retry_after_failure(true, "read-only", "CLI failed"));
         assert!(!retry_after_failure(false, "read-only", "CLI failed"));
         assert!(!retry_after_failure(true, "read-only", "Request cancelled"));
         assert!(!retry_after_failure(true, "read-only", "Request timed out after 10 minutes"));
