@@ -443,16 +443,33 @@ fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), S
 // The profile grants writes only to the selected workspace and ephemeral /tmp.
 #[cfg(target_os = "macos")]
 fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String> {
-    let path = root.to_str().ok_or("Workspace path is not UTF-8")?;
-    if path.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
-        return Err("Unsupported workspace path".into());
+    fn quoted(path: &Path) -> Result<String, String> {
+        let text = path.to_str().ok_or("Sandbox path is not UTF-8")?;
+        if text.chars().any(|c| c == '\\0' || c == '\\n' || c == '\\r') {
+            return Err("Unsupported sandbox path".into());
+        }
+        Ok(text.replace('\\\\', "\\\\\\\\").replace('"', "\\\""))
     }
-    let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-    if permission == "read-only" {
-        return Ok(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#.to_string());
+    if permission != "read-only" && permission != "workspace-write" {
+        return Err("Unsupported sandbox permission".into());
     }
-    if permission != "workspace-write" { return Err("Unsupported sandbox permission".into()); }
-    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
+    // Codex needs to persist its local session, and AAM stores session state
+    // in Git metadata. Neither location is covered by the workspace path.
+    let home = std::env::var_os("HOME").ok_or("HOME unavailable")?;
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from).unwrap_or_else(|| PathBuf::from(&home).join(".codex"));
+    let git_dir = std::process::Command::new("git")
+        .arg("-C").arg(root).args(["rev-parse", "--absolute-git-dir"])
+        .output().map_err(|_| "Cannot resolve Git metadata directory")?;
+    if !git_dir.status.success() { return Err("Cannot resolve Git metadata directory".into()); }
+    let git_path = PathBuf::from(String::from_utf8(git_dir.stdout)
+        .map_err(|_| "Invalid Git metadata path")?.trim());
+    let codex = quoted(&codex_home)?;
+    let git = quoted(&git_path.join("ai-agent-manager"))?;
+    let workspace = if permission == "workspace-write" {
+        format!(r#"(subpath "{}")"#, quoted(root)?)
+    } else { String::new() };
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{git}") {workspace})"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
