@@ -437,6 +437,32 @@ fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static 
     candidates
 }
 
+#[cfg(test)]
+mod routing_tests {
+    use super::route_candidates;
+
+    #[test]
+    fn task_fit_prefers_expected_provider() {
+        assert_eq!(route_candidates("Review security bug", "auto", "workspace-write")[0], "codex");
+        assert_eq!(route_candidates("Explain this module", "auto", "workspace-write")[0], "gemini");
+        assert_eq!(route_candidates("Create GitHub pull request", "auto", "workspace-write")[0], "copilot");
+    }
+
+    #[test]
+    fn permission_filter_excludes_uncontrolled_providers() {
+        for permission in ["read-only", "full-access"] {
+            assert_eq!(route_candidates("Explain this", "auto", permission).len(), 2);
+            assert!(route_candidates("Explain this", "auto", permission)
+                .iter().all(|id| ["claude", "codex"].contains(id)));
+        }
+    }
+
+    #[test]
+    fn balanced_is_stable() {
+        assert_eq!(route_candidates("Explain this", "balanced", "workspace-write")[0], "claude");
+    }
+}
+
 fn cli_on_path(binary: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|dir| {
