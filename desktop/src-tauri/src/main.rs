@@ -876,6 +876,29 @@ mod execution_fallback_tests {
         }
     }
     #[test]
+    fn workspace_fingerprint_detects_partial_edits() {
+        use std::process::Command;
+        let root = std::env::temp_dir().join(format!("aam-handoff-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&root)
+            .args(args).status().unwrap().success();
+        assert!(git(&["init", "-q"]));
+        assert!(git(&["config", "user.email", "test@example.invalid"]));
+        assert!(git(&["config", "user.name", "Test"]));
+        std::fs::write(root.join("tracked.txt"), "before").unwrap();
+        assert!(git(&["add", "."]));
+        assert!(git(&["commit", "-qm", "baseline"]));
+        let baseline = super::workspace_fingerprint(&root).unwrap();
+        std::fs::write(root.join("tracked.txt"), "after").unwrap();
+        assert_ne!(baseline, super::workspace_fingerprint(&root).unwrap());
+        std::fs::write(root.join("tracked.txt"), "before").unwrap();
+        assert_eq!(baseline, super::workspace_fingerprint(&root).unwrap());
+        std::fs::write(root.join("new.txt"), "untracked").unwrap();
+        assert_ne!(baseline, super::workspace_fingerprint(&root).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn continuation_preserves_original_request_and_requires_state_review() {
         let prompt = super::continuation_prompt("Update src/main.rs");
         assert!(prompt.contains("Inspect git status and diff first"));
