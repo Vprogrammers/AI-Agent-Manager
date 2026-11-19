@@ -298,47 +298,85 @@ struct ProviderSetup {
     detail: String,
 }
 
+// Authentication checks never return credential contents or raw CLI output to the UI.
+async fn auth_probe_output(executable: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
+    tokio::time::timeout(std::time::Duration::from_secs(8),
+        tokio::process::Command::new(executable).args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true).output()
+    ).await.ok()?.ok()
+}
+
+fn opencode_has_accounts(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(accounts) => !accounts.is_empty(),
+        serde_json::Value::Object(map) => {
+            if let Some(accounts) = map.get("accounts") { return opencode_has_accounts(accounts); }
+            if let Some(providers) = map.get("providers") { return opencode_has_accounts(providers); }
+            !map.is_empty()
+        }
+        _ => false,
+    }
+}
+
+async fn probe_provider_auth(id: &str, executable: &std::path::Path) -> (bool, &'static str, &'static str) {
+    let (args, verified_label): (&[&str], &str) = match id {
+        "claude" => (&["auth", "status"], "Claude authentication confirmed"),
+        "codex" => (&["login", "status"], "Codex authentication confirmed"),
+        "opencode" => (&["auth", "list", "--format", "json"], "OpenCode provider account detected"),
+        "antigravity" => (&["models"], "Antigravity models available through authenticated CLI"),
+        "copilot" => {
+            // Copilot may reuse the GitHub CLI credential. This checks GitHub login,
+            // not whether the account has Copilot entitlement.
+            if let Some(gh) = find_cli("gh") {
+                if auth_probe_output(&gh, &["auth", "status"]).await.is_some_and(|out| out.status.success()) {
+                    return (true, "ready", "GitHub CLI authenticated; Copilot access verified on execution");
+                }
+            }
+            return (false, "unknown", "Copilot login not independently verified; run Copilot to confirm access");
+        }
+        _ => return (false, "unknown", "Unsupported provider authentication probe"),
+    };
+    let Some(output) = auth_probe_output(executable, args).await else {
+        return (false, "unknown", "Authentication probe unavailable or timed out");
+    };
+    if !output.status.success() {
+        return if id == "claude" || id == "codex" {
+            (false, "login_required", "CLI reports no active authentication")
+        } else {
+            (false, "unknown", "CLI could not verify authentication; sign in or check provider configuration")
+        };
+    }
+    let authenticated = match id {
+        "opencode" => serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .ok().is_some_and(|value| opencode_has_accounts(&value)),
+        "antigravity" => !output.stdout.iter().all(|byte| byte.is_ascii_whitespace()),
+        _ => true,
+    };
+    if authenticated { (true, "ready", match id {
+        "opencode" => "OpenCode connected provider account found (credentials not exposed)",
+        "antigravity" => "Antigravity CLI returned available models",
+        _ => verified_label,
+    }) } else {
+        (false, "unknown", "No confirmed provider account or models found")
+    }
+}
+
 #[tauri::command]
 async fn provider_setup_status() -> Vec<ProviderSetup> {
     let mut result = Vec::new();
-    for (id, binary, args) in [
-        ("claude", "claude", vec!["auth", "status"]),
-        ("codex", "codex", vec!["login", "status"]),
-        ("antigravity", "agy", vec!["--version"]),
-        ("opencode", "opencode", vec!["auth", "list"]),
-        ("copilot", "copilot", vec!["--version"]),
+    for (id, binary) in [
+        ("claude", "claude"), ("codex", "codex"), ("antigravity", "agy"),
+        ("opencode", "opencode"), ("copilot", "copilot"),
     ] {
-        let executable = find_cli(binary);
-        let Some(executable) = executable else {
+        let Some(executable) = find_cli(binary) else {
             result.push(ProviderSetup { id: id.into(), installed: false, authenticated: false,
                 auth_status: "missing".into(), detail: "CLI not found in PATH".into() });
             continue;
         };
-        // Never return stdout/stderr: authentication diagnostics may contain private data.
-        let status = tokio::time::timeout(
-            std::time::Duration::from_secs(8),
-            tokio::process::Command::new(&executable)
-                .args(&args).stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null()).kill_on_drop(true).status(),
-        ).await;
-        // Only Claude and Codex expose the verified auth-status probes used here.
-        // Other CLI exit codes are not evidence of an authenticated account.
-        let (authenticated, auth_status, detail) = if ["antigravity", "opencode", "copilot"].contains(&id) {
-            match status {
-                Ok(Ok(exit)) if exit.success() => (false, "unknown", "CLI detected; authentication must be verified in the provider"),
-                Ok(Ok(_)) => (false, "unknown", "CLI detected; login status not independently verified"),
-                Ok(Err(_)) => (false, "unknown", "Could not execute CLI"),
-                Err(_) => (false, "unknown", "CLI probe timed out"),
-            }
-        } else {
-            match status {
-                Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
-                Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
-                Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
-                Err(_) => (false, "unknown", "Authentication check timed out"),
-            }
-        };
+        let (authenticated, auth_status, detail) = probe_provider_auth(id, &executable).await;
         result.push(ProviderSetup { id: id.into(), installed: true, authenticated,
             auth_status: auth_status.into(), detail: detail.into() });
     }
