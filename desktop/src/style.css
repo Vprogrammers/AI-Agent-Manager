@@ -76,6 +76,12 @@ aside select{width:100%;padding:11px 12px;border:1px solid #455260;border-radius
 .prompt-usage small{display:block;font-weight:400;line-height:1.5}
 
 /* Distinguish providers using the provider that actually completed the request. */
+footer .send-button.antigravity:not(:disabled){background:#9a8de2;border-color:#9a8de2;color:#171327}
+footer .send-button.antigravity:not(:disabled):hover{background:#b4a9f0;box-shadow:0 0 0 3px rgba(154,141,226,.2)}
+footer .send-button.opencode:not(:disabled){background:#7ca7e4;border-color:#7ca7e4;color:#101c30}
+footer .send-button.opencode:not(:disabled):hover{background:#a0bff0;box-shadow:0 0 0 3px rgba(124,167,228,.2)}
+footer .send-button.copilot:not(:disabled){background:#b3a1d7;border-color:#b3a1d7;color:#20162c}
+footer .send-button.copilot:not(:disabled):hover{background:#cab9e8;box-shadow:0 0 0 3px rgba(179,161,215,.2)}
 article.assistant.provider-claude{border-left-color:#d68b61}
 article.assistant.provider-codex{border-left-color:#35b9ad}
 article.assistant.provider-antigravity{border-left-color:#9a8de2}
