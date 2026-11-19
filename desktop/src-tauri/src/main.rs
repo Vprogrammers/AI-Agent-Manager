@@ -555,40 +555,64 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     #[cfg(unix)]
     isolate_process_group(&mut command);
     let result = async {
-        let child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
+        let mut child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
         #[cfg(unix)]
         let group_pid = child.id();
-        let output_result = await_runtime(async {
-            child.wait_with_output().await.map_err(|_| "Agent process failed".to_string())
+        let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
+        let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
+        let stderr_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut diagnostic = String::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if diagnostic.len() < 8192 { diagnostic.push_str(&line); diagnostic.push('\\n'); }
+            }
+            diagnostic
+        });
+        let mut lines = BufReader::new(stdout).lines();
+        let mut answer = String::new();
+        let read_result = await_runtime(async {
+            while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+                if answer.len() + line.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
+                answer.push_str(&line);
+                answer.push('\\n');
+                // External CLIs emit plain-text output; stream each line as it arrives.
+                let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+                    "kind":"activity","event":{"type":"external.output","provider":provider,"text":line}
+                }}));
+            }
+            child.wait().await.map_err(|e| e.to_string())
         }, stop.clone()).await;
-        #[cfg(unix)]
-        if output_result.is_err() { kill_process_group(group_pid); }
-        let output = output_result?;
-        if !output.status.success() {
-            // Only use diagnostic output for classification. Never return it to the UI:
-            // CLI diagnostics can contain credentials, prompts, or private paths.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let diagnostic = format!("{} {}", stderr.chars().take(8192).collect::<String>(), stdout.chars().take(8192).collect::<String>());
-            let kind = classify_agent_error(&diagnostic);
+        if read_result.is_err() {
+            #[cfg(unix)]
+            kill_process_group(group_pid);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        let stderr = if read_result.is_err() {
+            stderr_task.abort();
+            String::new()
+        } else {
+            tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task)
+                .await.ok().and_then(Result::ok).unwrap_or_default()
+        };
+        let status = read_result?;
+        if !status.success() {
+            let kind = classify_agent_error(&format!("{} {}", stderr, answer.chars().take(8192).collect::<String>()));
             if kind == "rate_limit" {
                 set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
                 return Err(format!("{provider} rate limit detected; cooldown 5 minutes. Continuing with a repository-state review on the next provider."));
             }
             if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
-            let exit_code = output.status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
+            let exit_code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
             eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}");
             let hint = match provider {
                 "opencode" => "OpenCode failed. Verify its configured model/provider and whether it works non-interactively with 'opencode run'.",
-                "copilot" => "Copilot failed. GitHub device login alone does not confirm Copilot access; verify 'copilot -p' works in your terminal.",
+                "copilot" => "Copilot failed. Verify 'copilot -p' works in your terminal.",
                 "antigravity" => "Antigravity failed. Verify 'agy --print' works non-interactively in the same workspace.",
                 _ => "Provider CLI failed. Check its configuration and permissions.",
             };
             return Err(format!("{hint} (exit: {exit_code}, category: {kind})"));
         }
-        if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let answer = text.to_string();
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"result","provider":provider,"model":"CLI default","answer":answer,"usage":{}
         }}));
