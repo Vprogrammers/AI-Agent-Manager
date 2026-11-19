@@ -28,3 +28,4 @@ jobs:
       - run: npm install --no-package-lock
       - run: npm run build
       - run: npx --yes tsx src/promptOptimizer.test.ts
+      - run: npx --yes tsx src/promptBenchmark.test.ts
