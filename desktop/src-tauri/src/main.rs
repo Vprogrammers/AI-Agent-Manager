@@ -366,8 +366,8 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         _ => return Err("Unsupported provider".into()),
     };
     // Do not silently grant full filesystem or shell access to new providers.
-    if permission == "full-access" {
-        return Err("Full-access mode is not yet supported for this provider; choose read-only or workspace-write.".into());
+    if permission != "workspace-write" {
+        return Err("This provider currently supports workspace-write only. Read-only sandboxing and full-access approval are not implemented.".into());
     }
     let executable = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).flat_map(|p| {
