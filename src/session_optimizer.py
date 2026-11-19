@@ -96,7 +96,7 @@ def independent_request(prompt):
     """Short, self-contained requests do not need a long native session."""
     import re
     normalized = prompt.strip().lower()
-    if re.fullmatch(r'(?:run|execute|pokreni|izvrši|izvrsi|proveri|provjeri)?\\s*git\\s+(?:status(?:\\s+-[a-z]+)?|branch(?:\\s+--show-current)?|rev-parse\\s+--abbrev-ref\\s+HEAD)', normalized):
+    if re.fullmatch(r'(?:run|execute|pokreni|izvrši|izvrsi|proveri|provjeri)?\s*git\s+(?:status(?:\s+-[a-z]+)?|branch(?:\s+--show-current)?|rev-parse\s+--abbrev-ref\s+HEAD)', normalized):
         return True
     return False
 
