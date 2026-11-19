@@ -422,7 +422,7 @@ mod adapter_contract_tests {
 }
 
 fn external_sandbox_ready(permission: &str) -> bool {
-    if permission != "workspace-write" { return false; }
+    if !["read-only", "workspace-write"].contains(&permission) { return false; }
     #[cfg(target_os = "linux")]
     { return cli_on_path("bwrap"); }
     #[cfg(target_os = "macos")]
@@ -442,26 +442,35 @@ fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), S
 // Escape the workspace for macOS Seatbelt's quoted sandbox profile syntax.
 // The profile grants writes only to the selected workspace and ephemeral /tmp.
 #[cfg(target_os = "macos")]
-fn macos_sandbox_profile(root: &Path) -> Result<String, String> {
+fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String> {
     let path = root.to_str().ok_or("Workspace path is not UTF-8")?;
     if path.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
         return Err("Unsupported workspace path".into());
     }
     let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+    if permission == "read-only" {
+        return Ok(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#.to_string());
+    }
+    if permission != "workspace-write" { return Err("Unsupported sandbox permission".into()); }
     Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
 // On unsupported platforms, never silently launch an unrestricted child.
-fn sandbox_command(executable: &Path, args: &[&str], root: &Path) -> Result<tokio::process::Command, String> {
+fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &str) -> Result<tokio::process::Command, String> {
     #[cfg(target_os = "linux")]
     {
         if !cli_on_path("bwrap") { return Err("bubblewrap unavailable".into()); }
         let mut command = tokio::process::Command::new("bwrap");
         command.args(["--die-with-parent", "--unshare-pid", "--new-session",
             "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
-            "--proc", "/proc", "--tmpfs", "/tmp", "--bind"])
-            .arg(root).arg(root).arg("--chdir").arg(root)
+            "--proc", "/proc", "--tmpfs", "/tmp"]);
+        if permission == "workspace-write" {
+            command.arg("--bind").arg(root).arg(root);
+        } else if permission != "read-only" {
+            return Err("Unsupported sandbox permission".into());
+        }
+        command.arg("--chdir").arg(root)
             .arg("--").arg(executable).args(args);
         Ok(command)
     }
@@ -469,12 +478,12 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path) -> Result<toki
     {
         if !cli_on_path("sandbox-exec") { return Err("Seatbelt sandbox unavailable".into()); }
         let mut command = tokio::process::Command::new("sandbox-exec");
-        command.arg("-p").arg(macos_sandbox_profile(root)?).arg(executable).args(args);
+        command.arg("-p").arg(macos_sandbox_profile(root, permission)?).arg(executable).args(args);
         Ok(command)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (executable, args, root);
+        let _ = (executable, args, root, permission);
         Err("No supported OS sandbox; execution blocked".into())
     }
 }
@@ -508,7 +517,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             candidates
         }).find(|p| p.is_file())
     }).ok_or(format!("{provider} CLI not found in PATH"))?;
-    let mut command = sandbox_command(&executable, &args, root)?;
+    let mut command = sandbox_command(&executable, &args, root, permission)?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let result = async {
@@ -681,7 +690,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let executable = aam_executable()?;
     let root_arg = root.to_str().ok_or("Invalid workspace path")?;
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
-    let mut child = sandbox_command(&executable, &args, root)?;
+    let mut child = sandbox_command(&executable, &args, root, permission)?;
     child.env("AAM_PERMISSION_MODE", permission);
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
