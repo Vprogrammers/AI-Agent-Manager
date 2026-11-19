@@ -854,7 +854,12 @@ fn workspace_fingerprint(root: &Path) -> Result<Vec<u8>, String> {
         .args(["diff", "--binary", "HEAD", "--"])
         .output().map_err(|e| format!("Cannot inspect workspace diff: {e}"))?;
     if !diff.status.success() { return Err("Cannot inspect Git diff".into()); }
-    let mut fingerprint = status.stdout;
+    let head = Command::new("git").arg("-C").arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output().map_err(|e| format!("Cannot inspect Git HEAD: {e}"))?;
+    if !head.status.success() { return Err("Cannot inspect Git HEAD".into()); }
+    let mut fingerprint = head.stdout;
+    fingerprint.extend_from_slice(&status.stdout);
     fingerprint.extend_from_slice(&diff.stdout);
     Ok(fingerprint)
 }
