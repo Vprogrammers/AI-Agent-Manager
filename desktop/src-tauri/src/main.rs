@@ -1041,9 +1041,27 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
     project_architect::apply(Path::new(&root), proposals)
 }
 
+#[tauri::command]
+fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -> Result<(), String> {
+    if !state.0.lock().map_err(|_| "Request state unavailable")?.is_empty() {
+        return Err("Stop the running agent before clearing its session".into());
+    }
+    let root = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    let git_dir = Command::new("git").arg("-C").arg(&root)
+        .args(["rev-parse", "--absolute-git-dir"]).output()
+        .map_err(|e| format!("Git: {e}"))?;
+    if !git_dir.status.success() { return Err("Workspace must be a Git repository".into()); }
+    let git_path = String::from_utf8(git_dir.stdout).map_err(|e| e.to_string())?;
+    let session = Path::new(git_path.trim()).join("ai-agent-manager").join("agent-bridge.json");
+    if session.exists() {
+        std::fs::remove_file(&session).map_err(|e| format!("Cannot clear session: {e}"))?;
+    }
+    Ok(())
+}
+
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
