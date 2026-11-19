@@ -81,10 +81,10 @@ function describeAgentStep(ev: Record<string,unknown>): AgentStep | null {
   const labels: Record<string,string> = {
     command_execution:'Terminal command', file_change:'File changes',
     mcp_tool_call:'External tool', web_search:'Web search',
-    reasoning:'Reasoning update', agent_message:'Agent message'
+    reasoning:'Reasoning update'
   };
-  if (type === 'turn.started' || type === 'thread.started') return {time:now,label:'Agent started',status:'running'};
-  if (type === 'turn.completed') return {time:now,label:'Agent finished',status:'done'};
+  // Lifecycle events are already represented by the request status bar.
+  if (type === 'turn.started' || type === 'thread.started' || type === 'turn.completed') return null;
   if (type === 'external.output' || type === 'external.chunk') return null;
   if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
     if (!labels[itemType]) return null;
@@ -93,8 +93,7 @@ function describeAgentStep(ev: Record<string,unknown>): AgentStep | null {
       : itemType === 'file_change' ? JSON.stringify(item.changes ?? item)
       : itemType === 'mcp_tool_call' ? [item.server, item.tool, item.arguments, item.result].filter(Boolean).map(safeDetail).join('\n')
       : itemType === 'web_search' ? safeDetail(item.query)
-      : itemType === 'reasoning' ? safeDetail(item.summary ?? item.text)
-      : itemType === 'agent_message' ? safeDetail(item.text) : '';
+      : itemType === 'reasoning' ? safeDetail(item.summary ?? item.text) : '';
     return {time:now,label:labels[itemType] + (type === 'item.completed' ? ' · completed' : ' · running'),detail:safeDetail(detail),status:type === 'item.started'?'running':'done'};
   }
   if (type === 'tool_use') return {time:now,label:'Tool: '+safeDetail(ev.name),detail:safeDetail(ev.input),status:'running'};
