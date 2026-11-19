@@ -449,10 +449,10 @@ fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String
     }
     let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
     if permission == "read-only" {
-        return Ok(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#.to_string());
+        return Ok(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#.to_string());
     }
     if permission != "workspace-write" { return Err("Unsupported sandbox permission".into()); }
-    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
@@ -462,7 +462,7 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &s
     {
         if !cli_on_path("bwrap") { return Err("bubblewrap unavailable".into()); }
         let mut command = tokio::process::Command::new("bwrap");
-        command.args(["--die-with-parent", "--unshare-pid", "--unshare-net", "--new-session",
+        command.args(["--die-with-parent", "--unshare-pid", "--new-session",
             "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
             "--proc", "/proc", "--tmpfs", "/tmp"]);
         if permission == "workspace-write" {
