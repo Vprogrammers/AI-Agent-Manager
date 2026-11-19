@@ -760,6 +760,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let mut lines = BufReader::new(stdout).lines();
     let mut reported_limit = false;
     let mut reported_error = false;
+    let mut reported_error_message = String::new();
     let mut observed_execution = false;
     let result = await_runtime(async {
         while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
@@ -767,6 +768,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
                 if event.get("kind").and_then(|v| v.as_str()) == Some("error") {
                     reported_error = true;
                     let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    reported_error_message = message.chars().take(300).collect();
                     if classify_agent_error(message) == "rate_limit" {
                         reported_limit = true;
                     }
@@ -808,7 +810,11 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         } else {
             // Avoid exposing stderr in UI: it can include prompts and secrets.
             // A local diagnostic log preserves the actual sandbox failure.
-            eprintln!("AAM {provider} engine failed: {}", stderr.chars().take(4096).collect::<String>());
+            let exit_status = result.as_ref().ok().map(|status| status.to_string()).unwrap_or_else(|| "interrupted".into());
+            let stderr_diagnostic: String = stderr.lines()
+                .filter(|line| !line.starts_with("[aam] Agent ready:"))
+                .take(12).collect::<Vec<_>>().join("\\n");
+            eprintln!("AAM {provider} engine failed (status={exit_status}, structured_error={reported_error_message:?}, observed_execution={observed_execution}): {stderr_diagnostic}");
             format!("{provider} engine exited unsuccessfully. See the Tauri terminal for sanitized diagnostics.")
         };
         return Err(message);
