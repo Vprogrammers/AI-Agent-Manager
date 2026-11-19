@@ -360,6 +360,64 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
 
 // Only Linux bubblewrap is supported for third-party CLI execution.
 // Never fall back to an unsandboxed subprocess when the sandbox is unavailable.
+// Single execution contract for all five providers. The legacy AAM engine
+// remains the transport for Claude/Codex until its event protocol is migrated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExecutionAdapter { Engine, SandboxedCli }
+
+#[derive(Clone, Copy, Debug)]
+struct ProviderAdapter {
+    id: &'static str,
+    transport: ExecutionAdapter,
+}
+
+const PROVIDER_ADAPTERS: [ProviderAdapter; 5] = [
+    ProviderAdapter { id: "claude", transport: ExecutionAdapter::Engine },
+    ProviderAdapter { id: "codex", transport: ExecutionAdapter::Engine },
+    ProviderAdapter { id: "gemini", transport: ExecutionAdapter::SandboxedCli },
+    ProviderAdapter { id: "opencode", transport: ExecutionAdapter::SandboxedCli },
+    ProviderAdapter { id: "copilot", transport: ExecutionAdapter::SandboxedCli },
+];
+
+fn provider_adapter(id: &str) -> Option<ProviderAdapter> {
+    PROVIDER_ADAPTERS.iter().copied().find(|adapter| adapter.id == id)
+}
+
+fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), String> {
+    if !["read-only", "workspace-write", "full-access"].contains(&permission) {
+        return Err("Invalid permission mode".into());
+    }
+    if !cli_on_path(adapter.id) { return Err(format!("{} CLI not installed", adapter.id)); }
+    match adapter.transport {
+        ExecutionAdapter::Engine => {
+            aam_executable().map(|_| ()).map_err(|_| "AAM engine unavailable".into())
+        },
+        ExecutionAdapter::SandboxedCli => external_provider_preflight(adapter.id, permission),
+    }
+}
+
+#[cfg(test)]
+mod adapter_contract_tests {
+    use super::{provider_adapter, ExecutionAdapter, PROVIDER_ADAPTERS};
+    #[test]
+    fn every_provider_has_exactly_one_adapter() {
+        let mut ids = std::collections::HashSet::new();
+        for adapter in PROVIDER_ADAPTERS {
+            assert!(ids.insert(adapter.id));
+        }
+        assert_eq!(ids.len(), 5);
+    }
+    #[test]
+    fn engine_and_sandbox_transports_are_explicit() {
+        assert_eq!(provider_adapter("claude").unwrap().transport, ExecutionAdapter::Engine);
+        assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::Engine);
+        for id in ["gemini", "opencode", "copilot"] {
+            assert_eq!(provider_adapter(id).unwrap().transport, ExecutionAdapter::SandboxedCli);
+        }
+        assert!(provider_adapter("unknown").is_none());
+    }
+}
+
 fn external_sandbox_ready(permission: &str) -> bool {
     if permission != "workspace-write" { return false; }
     #[cfg(target_os = "linux")]
@@ -615,23 +673,23 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         let cooldowns = app.state::<ProviderCooldowns>();
         let mut chosen = None;
         for candidate in candidates {
-            if !cli_on_path(candidate) || !provider_available(candidate, &cooldowns) { continue; }
-            if ["gemini", "opencode", "copilot"].contains(&candidate)
-                && external_provider_preflight(candidate, &permission).is_err() { continue; }
-            // A missing bundled engine is a pre-execution failure: safely try another CLI.
-            if ["claude", "codex"].contains(&candidate) && aam_executable().is_err() { continue; }
+            let Some(adapter) = provider_adapter(candidate) else { continue; };
+            if !provider_available(candidate, &cooldowns) { continue; }
+            if validate_execution(adapter, &permission).is_err() { continue; }
             if verified_auth_probe(candidate).await == Some(false) { continue; }
             chosen = Some(candidate);
             break;
         }
         let chosen = chosen.ok_or("No compatible agent CLI available: check installation, authentication and cooldown")?;
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
-            "kind":"routing","reason":format!("Task-based routing selected {chosen}; available CLI detected"),"model":"CLI default"
+            "kind":"routing","reason":format!("Task-based routing selected {chosen}; preflight passed"),"model":"CLI default"
         }}));
         chosen.to_string()
     } else { provider.clone() };
-    if ["gemini", "opencode", "copilot"].contains(&selected.as_str()) {
-        let result = run_external_provider(&app, &request_id, &path, &selected, &prompt, &permission).await;
+    let adapter = provider_adapter(&selected).ok_or("Unknown execution adapter")?;
+    validate_execution(adapter, &permission)?;
+    if adapter.transport == ExecutionAdapter::SandboxedCli {
+        let result = run_external_provider(&app, &request_id, &path, adapter.id, &prompt, &permission).await;
         if let Err(ref message) = result {
             let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{"kind":"process_error","message":message}}));
         }
