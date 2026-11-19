@@ -1167,12 +1167,16 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
 
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
+    let end_to_end_started = std::time::Instant::now();
     if !["claude", "codex", "antigravity", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
     if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
     if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
     let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
     if !path.is_dir() { return Err("Workspace is not a directory".into()); }
+    let workspace_validation_ms = end_to_end_started.elapsed().as_millis();
+    let git_started = std::time::Instant::now();
     let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
+    let git_validation_ms = git_started.elapsed().as_millis();
     if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
     let request_started = std::time::Instant::now();
     let automatic = provider == "auto" || provider == "balanced";
@@ -1181,6 +1185,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     } else {
         vec![provider.as_str()]
     };
+    let routing_ms = request_started.elapsed().as_millis();
     let mut last_preflight_error = String::from("No compatible agent CLI available");
     let mut continue_after_limit = false;
     for candidate in candidates {
@@ -1208,14 +1213,21 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             handoff_prompt = continuation_prompt(&prompt);
             handoff_prompt.as_str()
         } else { prompt.as_str() };
+        let fingerprint_started = std::time::Instant::now();
         let before = workspace_fingerprint(&path)?;
+        let fingerprint_ms = fingerprint_started.elapsed().as_millis();
         let execution_started = std::time::Instant::now();
         let outcome = execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await;
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"timing","provider":candidate,
             "preflightMs":preflight_ms,
             "executionMs":execution_started.elapsed().as_millis(),
-            "totalMs":request_started.elapsed().as_millis()
+            "totalMs":end_to_end_started.elapsed().as_millis(),
+            "workspaceValidationMs":workspace_validation_ms,
+            "gitValidationMs":git_validation_ms,
+            "routingMs":routing_ms,
+            "fingerprintMs":fingerprint_ms,
+            "backendElapsedMs":end_to_end_started.elapsed().as_millis()
         }}));
         match outcome {
             Err(message) if retry_after_failure(automatic, &permission, &message) => {
