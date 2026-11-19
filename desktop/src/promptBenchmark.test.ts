@@ -8,7 +8,7 @@ const cases = [
  {request:'Refactor Kotlin repository without changing public API.',kind:'refactor'},
  {request:'Review security of backend authentication. Do not edit files.',kind:'review'},
  {request:'Update README documentation for the Python CLI.',kind:'docs'},
- {request:'Investigate the failing build in this repository.',kind:'general'},
+ {request:'Investigate the failing build in this repository.',kind:'bug'},
  {request:'git status -sb',kind:'command'},
  {request:'Fix src/login.ts when login fails. Keep existing tests.',kind:'bug'},
  {request:'Create a React component, only change src/ui.tsx.',kind:'feature'},
