@@ -666,10 +666,13 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
             let exit_code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
             eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}");
-            let hint = match provider {
-                "opencode" => "OpenCode failed. Verify its configured model/provider and whether it works non-interactively with 'opencode run'.",
-                "copilot" => "Copilot failed. Verify 'copilot -p' works in your terminal.",
-                "antigravity" => "Antigravity failed. Verify 'agy --print' works non-interactively in the same workspace.",
+            let hint = match (provider, kind) {
+                (_, "sandbox_permission") => "CLI was denied filesystem access. Check provider-specific cache/config permissions in the OS sandbox; do not disable isolation as a permanent workaround.",
+                (_, "model_configuration") => "CLI could not use its configured model/provider. Verify the selected model and provider account.",
+                (_, "network") => "CLI could not reach its provider. Check network access and provider availability.",
+                ("opencode", _) => "OpenCode exited before completing the request. Test 'opencode run' in the same workspace; check configured model and CLI diagnostics.",
+                ("copilot", _) => "Copilot failed. Verify 'copilot -p' works in your terminal.",
+                ("antigravity", _) => "Antigravity failed. Verify 'agy --print' works non-interactively in the same workspace.",
                 _ => "Provider CLI failed. Check its configuration and permissions.",
             };
             return Err(format!("{hint} (exit: {exit_code}, category: {kind})"));
@@ -790,6 +793,9 @@ fn classify_agent_error(message: &str) -> &'static str {
     else if ["unauthorized", "authentication required", "login required",
         "not logged in", "invalid api key", "401"].iter()
         .any(|phrase| normalized.contains(phrase)) { "auth_required" }
+    else if ["operation not permitted", "permission denied", "sandbox", "access denied", "eacces", "eperm", "read-only file system"].iter().any(|phrase| normalized.contains(phrase)) { "sandbox_permission" }
+    else if ["model not found", "model is not configured", "no model", "unknown model", "provider not found", "no provider", "api key not set"].iter().any(|phrase| normalized.contains(phrase)) { "model_configuration" }
+    else if ["network", "connection refused", "dns", "timed out", "enotfound"].iter().any(|phrase| normalized.contains(phrase)) { "network" }
     else { "unknown" }
 }
 
