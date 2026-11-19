@@ -1,3 +1,4 @@
+import { TASK_TEMPLATES, selectProjectContext, type TaskKind } from './promptTemplates';
 /** Local, deterministic prompt suggestions. No provider calls. */
 /** Conservative equivalence: only well-known instruction aliases, never remove user requirements. */
 export function semanticInstructionKey(line:string):string {
@@ -43,14 +44,6 @@ const patterns: [string,RegExp][] = [
  ['review',/\b(review|audit|security|analiz|proveri|provjeri|pregled)\b/i],
  ['docs',/\b(readme|documentation|docs|dokument)\b/i],
 ];
-const steps: Record<string,string[]> = {
- bug:['Reproduce the issue if possible and identify the root cause.','Apply the smallest safe fix.','Run relevant regression tests.'],
- feature:['Inspect existing implementation and dependencies.','Implement the requested behavior using project conventions.','Add or update relevant tests.'],
- refactor:['Preserve public behavior and interfaces.','Make focused changes without unrelated rewrites.','Run regression checks.'],
- review:['Report concrete findings with file references and severity.','Do not modify code unless requested.'],
- docs:['Verify claims against the current code.','Update only relevant documentation.'],
- general:['Inspect relevant existing code before changes.','Verify the outcome and report limitations.']
-};
 export function isDirectCommand(text:string):boolean {
  return /^(?:(?:run|execute|pokreni|izvrši|izvrsi)\s+)?git\s+(?:status|branch|diff|log|rev-parse)(?:\s+[-\w./]+)*\s*$/i.test(text.trim());
 }
@@ -65,15 +58,16 @@ export function analyzePrompt(text:string, files:string[]=[], instructions:strin
  if(!/\b(when|after|before|expected|should|fails|crash|error|kada|nakon|oček|treba|ne radi)\b/i.test(original)&&kind==='bug') missing.push('Describe how to reproduce the problem and the expected result.');
  if(original.length<25&&kind==='general') missing.push('Clarify the intended outcome.');
  const clarity=Math.max(10,Math.min(95,95-missing.length*25-(original.length<35?15:0)));
- const relevantFiles=files.slice(0,5);
- const concise=kind==='general'?[]:steps[kind].slice(0,1);
- const balanced=steps[kind].slice(0,2);
- const detailed=steps[kind];
+ const context=selectProjectContext(files,instructions,existingSession);
+ const relevantFiles=context.files;
+ const concise=kind==='general'?[]:TASK_TEMPLATES[kind as TaskKind].slice(0,1);
+ const balanced=TASK_TEMPLATES[kind as TaskKind].slice(0,2);
+ const detailed=TASK_TEMPLATES[kind as TaskKind];
  const selected=strategy==='concise'?concise:strategy==='balanced'?balanced:detailed;
  const additions:string[]=[];
  const prior=followupContext(original,previousRequest);
  if(prior) additions.push(prior);
- if(!existingSession&&instructions.length) additions.push('Follow existing project instructions: '+instructions.slice(0,4).join(', ')+'.');
+ if(context.instructions.length) additions.push('Follow existing project instructions: '+context.instructions.join(', ')+'.');
  if(relevantFiles.length&&strategy!=='concise') additions.push('Check potentially relevant files (verify before editing): '+relevantFiles.join(', ')+'.');
  additions.push(...selected);
  if(agent==='claude'&&strategy==='detailed')additions.push('Explain the reasoning behind nontrivial design decisions concisely.');
