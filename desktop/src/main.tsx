@@ -435,14 +435,21 @@ function App() {
             if (eventType !== 'external.chunk') setActivity(eventType + (item?.type ? ' · '+item.type : ''));
             // Claude emits content_block_delta; Codex emits agent_message deltas.
             // Some CLI versions only emit completed messages: render those as snapshots.
+            const nested = eventType === 'stream_event' ? ev.event as Record<string,unknown> | undefined : undefined;
+            const nestedDelta = nested?.delta as Record<string,unknown> | undefined;
             const delta = ev.delta as Record<string,unknown> | undefined;
             const message = ev.message as Record<string,unknown> | undefined;
             const itemText = typeof item?.text === 'string' ? item.text : '';
             let chunk = '';
-            if (eventType === 'content_block_delta' && delta?.type === 'text_delta' && typeof delta.text === 'string') {
+            if (eventType === 'stream_event' && nested?.type === 'content_block_delta' && nestedDelta?.type === 'text_delta' && typeof nestedDelta.text === 'string') {
+              chunk = nestedDelta.text;
+              claudeSnapshot += chunk;
+            } else if (eventType === 'content_block_delta' && delta?.type === 'text_delta' && typeof delta.text === 'string') {
               chunk = delta.text;
+              claudeSnapshot += chunk;
             } else if ((eventType === 'item.agent_message.delta' || eventType === 'response.output_text.delta') && typeof ev.delta === 'string') {
               chunk = ev.delta;
+              codexSnapshot += chunk;
             } else if (eventType === 'item.completed' && item?.type === 'agent_message' && itemText) {
               if (itemText.startsWith(codexSnapshot)) chunk = itemText.slice(codexSnapshot.length);
               else if (!streamText) chunk = itemText;
