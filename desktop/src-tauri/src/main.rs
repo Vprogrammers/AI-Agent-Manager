@@ -480,6 +480,16 @@ mod routing_tests {
         assert_eq!(classify_agent_error("Compilation failed"), "unknown");
     }
     #[test]
+    fn cooldown_excludes_provider_until_expiry() {
+        use super::{ProviderCooldowns, provider_available, set_provider_cooldown};
+        let cooldowns = ProviderCooldowns::default();
+        assert!(provider_available("gemini", &cooldowns));
+        set_provider_cooldown("gemini", &cooldowns);
+        assert!(!provider_available("gemini", &cooldowns));
+        assert!(provider_available("codex", &cooldowns));
+    }
+
+    #[test]
     fn balanced_is_stable() {
         assert_eq!(route_candidates("Explain this", "balanced", "workspace-write")[0], "claude");
     }
@@ -551,6 +561,8 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         let mut chosen = None;
         for candidate in candidates {
             if !cli_on_path(candidate) || !provider_available(candidate, &cooldowns) { continue; }
+            // A missing bundled engine is a pre-execution failure: safely try another CLI.
+            if ["claude", "codex"].contains(&candidate) && aam_executable().is_err() { continue; }
             if verified_auth_probe(candidate).await == Some(false) { continue; }
             chosen = Some(candidate);
             break;
