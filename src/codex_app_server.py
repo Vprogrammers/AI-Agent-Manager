@@ -29,7 +29,7 @@ def run_codex_app_server(cwd, prompt, session_id=None, model=None, env=None,
         if request:
             sequence += 1
             obj['id'] = sequence
-        proc.stdin.write((json.dumps(obj) + '\\n').encode())
+        proc.stdin.write((json.dumps(obj) + '\n').encode())
         proc.stdin.flush()
         return sequence if request else None
     def receive(deadline):
@@ -43,7 +43,7 @@ def run_codex_app_server(cwd, prompt, session_id=None, model=None, env=None,
             if not ready:
                 continue
             ch = os.read(proc.stdout.fileno(), 1)
-            if ch == b'\\n':
+            if ch == b'\n':
                 try:
                     return json.loads(buffer)
                 except ValueError:
@@ -121,7 +121,7 @@ def run_codex_app_server(cwd, prompt, session_id=None, model=None, env=None,
                           {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': answer}},
                           {'type': 'turn.completed', 'usage': usage}]
                 return subprocess.CompletedProcess(['codex', 'app-server'], 0,
-                                                   '\\n'.join(json.dumps(x) for x in events), '')
+                                                   '\n'.join(json.dumps(x) for x in events), '')
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)
