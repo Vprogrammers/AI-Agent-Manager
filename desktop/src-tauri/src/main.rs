@@ -479,7 +479,7 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path) -> Result<toki
     }
 }
 
-async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
+async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
         "gemini" => ("gemini", vec!["-p", prompt, "--output-format", "json"]),
         "opencode" => ("opencode", vec!["run", prompt]),
@@ -499,11 +499,6 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     let mut command = sandbox_command(&executable, &args, root)?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    let stop = Arc::new(tokio::sync::Notify::new());
-    {
-        let state = app.state::<RunningRequests>();
-        state.0.lock().map_err(|_| "Request state unavailable")?.insert(request_id.into(), stop.clone());
-    }
     let result = async {
         let child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
         let output = tokio::select! {
@@ -538,7 +533,6 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         }}));
         Ok(())
     }.await;
-    if let Ok(mut requests) = app.state::<RunningRequests>().0.lock() { requests.remove(request_id); }
     result
 }
 
@@ -672,7 +666,7 @@ async fn verified_auth_probe(provider: &str) -> Option<bool> {
 }
 
 #[tauri::command]
-async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
+async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     // The AAM engine is isolated by the same OS boundary as external CLIs.
     // Its child processes inherit this sandbox.
     let executable = aam_executable()?;
@@ -683,11 +677,6 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let mut child = child.spawn().map_err(|e| format!("PRESTART: Cannot launch aam: {e}"))?;
-    let stop = Arc::new(tokio::sync::Notify::new());
-    {
-        let state = app.state::<RunningRequests>();
-        state.0.lock().map_err(|_|"Request state unavailable")?.insert(request_id.to_string(),stop.clone());
-    }
     let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
     let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
     let stderr_task = tokio::spawn(async move {
@@ -723,10 +712,6 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         // may need separate process-group cleanup on each supported OS.
         let _ = child.start_kill();
         let _ = child.wait().await;
-    }
-    {
-        let state = app.state::<RunningRequests>();
-        if let Ok(mut requests) = state.0.lock() { requests.remove(request_id); };
     }
     if let Err(message) = result.as_ref() {
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
@@ -769,12 +754,22 @@ mod execution_fallback_tests {
 
 async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, adapter: ProviderAdapter, prompt: &str, permission: &str) -> Result<(), String> {
     validate_execution(adapter, permission)?;
+    let stop = Arc::new(tokio::sync::Notify::new());
+    {
+        let state = app.state::<RunningRequests>();
+        let mut requests = state.0.lock().map_err(|_| "Request state unavailable")?;
+        if requests.contains_key(request_id) { return Err("Request already running".into()); }
+        requests.insert(request_id.to_string(), stop.clone());
+    }
     let result = match adapter.transport {
         ExecutionAdapter::Engine =>
-            run_engine_adapter(app, request_id, root, adapter.id, prompt, permission).await,
+            run_engine_adapter(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
         ExecutionAdapter::SandboxedCli =>
             run_external_provider(app, request_id, root, adapter.id, prompt, permission).await,
     };
+    if let Ok(mut requests) = app.state::<RunningRequests>().0.lock() {
+        requests.remove(request_id);
+    }
     if let Err(ref message) = result {
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"process_error","provider":adapter.id,"message":message
