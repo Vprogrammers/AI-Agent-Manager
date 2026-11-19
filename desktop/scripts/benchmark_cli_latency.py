@@ -5,7 +5,7 @@ Run from a Git workspace on macOS:
   python3 desktop/scripts/benchmark_cli_latency.py --provider all --runs 5
   python3 desktop/scripts/benchmark_cli_latency.py --provider opencode --runs 5
 
-Only a read-only prompt is sent. The script never modifies project files.
+Only a read-only prompt is sent. The benchmark only sends a read-only prompt; results default to /tmp.
 Results include startup, first output, completion, and sandbox overhead.
 """
 import argparse
@@ -114,7 +114,7 @@ def main():
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--output", type=Path, default=Path("aam-latency-results.json"))
+    parser.add_argument("--output", type=Path, default=Path("/tmp/aam-latency-results.json"))
     args = parser.parse_args()
     if args.runs < 1 or args.timeout < 1:
         parser.error("--runs and --timeout must be positive")
