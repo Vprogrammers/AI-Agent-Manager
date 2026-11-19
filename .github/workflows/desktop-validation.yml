@@ -27,6 +27,11 @@ jobs:
       - name: TypeScript and Vite build
         working-directory: desktop
         run: npm run build
+      - name: Install engine bundler
+        run: python3 -m pip install --user pyinstaller
+      - name: Build real engine sidecar
+        working-directory: desktop
+        run: npm run bundle:engine
       - name: Rust unit tests
         working-directory: desktop/src-tauri
         run: cargo test
