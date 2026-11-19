@@ -321,6 +321,19 @@ fn opencode_has_accounts(value: &serde_json::Value) -> bool {
     }
 }
 
+#[cfg(test)]
+mod provider_auth_tests {
+    use super::*;
+    #[test]
+    fn opencode_requires_a_nonempty_account_list() {
+        assert!(!opencode_has_accounts(&serde_json::json!([])));
+        assert!(!opencode_has_accounts(&serde_json::json!({"accounts":[]})));
+        assert!(opencode_has_accounts(&serde_json::json!([{"provider":"anthropic"}])));
+        assert!(opencode_has_accounts(&serde_json::json!({"accounts":[{"provider":"openai"}]})));
+        assert!(!opencode_has_accounts(&serde_json::Value::Null));
+    }
+}
+
 async fn probe_provider_auth(id: &str, executable: &std::path::Path) -> (bool, &'static str, &'static str) {
     let (args, verified_label): (&[&str], &str) = match id {
         "claude" => (&["auth", "status"], "Claude authentication confirmed"),
@@ -332,7 +345,7 @@ async fn probe_provider_auth(id: &str, executable: &std::path::Path) -> (bool, &
             // not whether the account has Copilot entitlement.
             if let Some(gh) = find_cli("gh") {
                 if auth_probe_output(&gh, &["auth", "status"]).await.is_some_and(|out| out.status.success()) {
-                    return (true, "ready", "GitHub CLI authenticated; Copilot access verified on execution");
+                    return (false, "unknown", "GitHub CLI authenticated; Copilot account entitlement not independently verified");
                 }
             }
             return (false, "unknown", "Copilot login not independently verified; run Copilot to confirm access");
