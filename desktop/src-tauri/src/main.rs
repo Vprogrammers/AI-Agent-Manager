@@ -488,6 +488,26 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path, permission: &s
     }
 }
 
+// Start every Unix sandbox in its own process group so cancellation can
+// terminate descendants as well as the sandbox launcher.
+#[cfg(unix)]
+fn isolate_process_group(command: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // Negative PID targets the entire group, not only the leader.
+        let _ = std::process::Command::new("/bin/kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 // Shared execution deadline and cancellation contract for every adapter.
 async fn await_runtime<T, F>(future: F, stop: Arc<tokio::sync::Notify>) -> Result<T, String>
 where
@@ -520,11 +540,18 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     let mut command = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]
+    isolate_process_group(&mut command);
     let result = async {
         let child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
-        let output = await_runtime(async {
+        #[cfg(unix)]
+        let group_pid = child.id();
+        let output_result = await_runtime(async {
             child.wait_with_output().await.map_err(|_| "Agent process failed".to_string())
-        }, stop.clone()).await?;
+        }, stop.clone()).await;
+        #[cfg(unix)]
+        if output_result.is_err() { kill_process_group(group_pid); }
+        let output = output_result?;
         if !output.status.success() {
             // Only use diagnostic output for classification. Never return it to the UI:
             // CLI diagnostics can contain credentials, prompts, or private paths.
@@ -694,6 +721,8 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     child.env("AAM_PERMISSION_MODE", permission);
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    #[cfg(unix)]
+    isolate_process_group(&mut child);
     let mut child = child.spawn().map_err(|e| format!("PRESTART: Cannot launch aam: {e}"))?;
     let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
     let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
@@ -724,8 +753,8 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         child.wait().await.map_err(|e| e.to_string())
     }, stop.clone()).await;
     if result.is_err() {
-        // kill_on_drop terminates the AAM process; the engine's subprocess handling
-        // may need separate process-group cleanup on each supported OS.
+        #[cfg(unix)]
+        kill_process_group(child.id());
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
