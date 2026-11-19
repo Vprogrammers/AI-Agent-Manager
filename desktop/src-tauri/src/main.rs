@@ -469,7 +469,7 @@ fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String
     let workspace = if permission == "workspace-write" {
         format!(r#"(subpath "{}")"#, quoted(root)?)
     } else { String::new() };
-    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{git}") {workspace})"#))
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow ipc*) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{git}") {workspace})"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
