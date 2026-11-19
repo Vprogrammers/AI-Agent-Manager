@@ -25,6 +25,7 @@ const TOKEN_LABELS: Record<string,string> = {
   cache_creation_input_tokens: 'Cache creation',
   output_tokens: 'Output',
   reasoning_output_tokens: 'Reasoning output',
+  agent_turns: 'Agent turns (Claude)',
 };
 type TokenUsage = Record<string, number>;
 type UsageRecord = { provider: Provider; model: string; duration: number; usage: TokenUsage; time: string };
@@ -82,9 +83,10 @@ function TokenTable({usage}: {usage:TokenUsage}) {
     {typeof cached === 'number' && row('Cached input', cached)}
     {typeof usage.cache_creation_input_tokens === 'number' && row('Cache creation', usage.cache_creation_input_tokens)}
     {typeof usage.output_tokens === 'number' && row('Output', usage.output_tokens)}
-    {row('Internal model calls', 'Not reported')}
+    {row('Internal model calls', 'Not exposed by CLI')}
+    {typeof usage.agent_turns === 'number' && row('Claude agent turns', usage.agent_turns)}
     <details><summary>Raw provider counters</summary>{rows.map(([label,value],i)=><div className="token-row" key={i}><span>{label}</span><span className="token-value">{numberFormat(value)}</span></div>)}</details>
-    <small>Provider counters are not directly comparable across Claude and Codex. Total processed is an estimate from reported counters, not billing or quota usage. Model call count is unavailable unless explicitly reported.</small>
+    <small>Provider counters are not directly comparable across Claude and Codex. Total processed is an estimate from reported counters, not billing or quota usage. Claude agent turns are measured separately from model calls; Codex JSON does not expose per-model-call events.</small>
   </div>;
 }
 
