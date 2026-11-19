@@ -1042,6 +1042,25 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 }
 
 #[tauri::command]
+fn relevant_prompt_files(root: String, prompt: String) -> Result<Vec<String>, String> {
+    let root = Path::new(&root).canonicalize().map_err(|e| e.to_string())?;
+    let output = Command::new("git").arg("-C").arg(&root).args(["ls-files", "-z"])
+        .output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err("Not a Git repository".into()); }
+    let terms: Vec<String> = prompt.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|t| t.len() >= 4).map(|t| t.to_ascii_lowercase()).collect();
+    let mut matches: Vec<(usize,String)> = output.stdout.split(|b| *b == 0).filter_map(|bytes| {
+        let path = String::from_utf8(bytes.to_vec()).ok()?;
+        let lower = path.to_ascii_lowercase();
+        if [".env", "secret", "credential", "node_modules/", "build/", "dist/"].iter().any(|x| lower.contains(x)) { return None; }
+        let score = terms.iter().filter(|term| lower.contains(term.as_str())).count();
+        if score == 0 { None } else { Some((score,path)) }
+    }).collect();
+    matches.sort_by(|a,b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    Ok(matches.into_iter().take(8).map(|(_,path)| path).collect())
+}
+
+#[tauri::command]
 fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -> Result<(), String> {
     if !state.0.lock().map_err(|_| "Request state unavailable")?.is_empty() {
         return Err("Stop the running agent before clearing its session".into());
@@ -1062,6 +1081,6 @@ fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![relevant_prompt_files, clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
