@@ -113,3 +113,23 @@ footer.composer>.send-button{flex-shrink:0}
 .agent-step-done{color:#b3c3d1}
 
 .agent-step-detail{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow-y:auto;background:#101820;border:1px solid #364353;border-radius:6px;padding:8px;margin:5px 0 7px}
+
+
+/* Shared Markdown presentation for streamed and completed AI responses. */
+.markdown-answer{font-size:14px;line-height:1.65;overflow-wrap:anywhere;min-width:0}
+.markdown-answer>:first-child{margin-top:0}
+.markdown-answer>:last-child{margin-bottom:0}
+.markdown-answer h1,.markdown-answer h2,.markdown-answer h3,.markdown-answer h4{line-height:1.3;margin:1.35em 0 .55em;font-weight:700}
+.markdown-answer h1{font-size:1.5em}.markdown-answer h2{font-size:1.25em}.markdown-answer h3{font-size:1.1em}
+.markdown-answer p,.markdown-answer ul,.markdown-answer ol,.markdown-answer blockquote{margin:.65em 0}
+.markdown-answer ul,.markdown-answer ol{padding-left:1.6em}
+.markdown-answer li+li{margin-top:.25em}
+.markdown-answer pre{overflow-x:auto;white-space:pre;max-width:100%;padding:14px;border-radius:8px;background:#101820;border:1px solid #354252;font-size:12px;line-height:1.5}
+.markdown-answer code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em}
+.markdown-answer :not(pre)>code{padding:.12em .32em;background:#283542;border-radius:4px}
+.markdown-answer a{color:#67d8ce;text-decoration:underline;text-underline-offset:2px}
+.markdown-answer blockquote{border-left:3px solid #6b9aaf;padding-left:12px;color:#bdcbd7}
+.markdown-answer table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:1em 0}
+.markdown-answer th,.markdown-answer td{border:1px solid #475362;padding:7px 10px;text-align:left;white-space:normal}
+.markdown-answer th{background:#293744}
+.markdown-answer hr{border:0;border-top:1px solid #475362;margin:1.2em 0}
