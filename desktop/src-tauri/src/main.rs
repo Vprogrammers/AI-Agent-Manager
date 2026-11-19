@@ -460,11 +460,13 @@ fn macos_sandbox_profile(root: &Path, permission: &str) -> Result<String, String
     let git_path = PathBuf::from(String::from_utf8(git_dir.stdout)
         .map_err(|_| "Invalid Git metadata path")?.trim());
     let codex = quoted(&codex_home)?;
+    // The Python engine initializes provider profiles even for Claude.
+    let profile_state = quoted(&PathBuf::from(&home).join(".local/state/ai-agent-manager"))?;
     let git = quoted(&git_path.join("ai-agent-manager"))?;
     let workspace = if permission == "workspace-write" {
         format!(r#"(subpath "{}")"#, quoted(root)?)
     } else { String::new() };
-    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow ipc*) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{git}") {workspace})"#))
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow ipc*) (allow network*) (allow file-read*) (allow file-write* (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null") (subpath "{codex}") (subpath "{profile_state}") (subpath "{git}") {workspace})"#))
 }
 
 // One platform isolation policy for both engine and direct CLI transports.
