@@ -711,6 +711,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}, diagnostic={}", safe_provider_diagnostic(&stderr));
             let hint = match (provider, kind) {
                 (_, "sandbox_permission") => "CLI was denied filesystem access. Check provider-specific cache/config permissions in the OS sandbox; do not disable isolation as a permanent workaround.",
+                (_, "insufficient_credits") => "Provider has insufficient credits for the selected paid model. Choose an available model/account or add credits; this is not a login or sandbox error.",
                 (_, "model_configuration") => "CLI could not use its configured model/provider. Verify the selected model and provider account.",
                 (_, "network") => "CLI could not reach its provider. Check network access and provider availability.",
                 ("opencode", _) => "OpenCode exited before completing the request. Test 'opencode run' in the same workspace; check configured model and CLI diagnostics.",
@@ -791,6 +792,7 @@ mod routing_tests {
         }
         assert_eq!(classify_agent_error("401 Unauthorized"), "auth_required");
         assert_eq!(classify_agent_error("Compilation failed"), "unknown");
+        assert_eq!(classify_agent_error("Insufficient balance. This request is pay-as-you-go, billed to OpenCode Models credits."), "insufficient_credits");
     }
     #[test]
     fn external_sandbox_rejects_unsupported_permissions() {
@@ -833,6 +835,7 @@ fn classify_agent_error(message: &str) -> &'static str {
     if ["rate limit", "rate_limit", "429", "quota exceeded", "resource_exhausted",
         "usage limit", "too many requests", "credits exhausted", "limit reached"]
         .iter().any(|phrase| normalized.contains(phrase)) { "rate_limit" }
+    else if ["insufficient balance", "insufficient credits", "billing/credits", "payment required"].iter().any(|phrase| normalized.contains(phrase)) { "insufficient_credits" }
     else if ["unauthorized", "authentication required", "login required",
         "not logged in", "invalid api key", "401"].iter()
         .any(|phrase| normalized.contains(phrase)) { "auth_required" }
