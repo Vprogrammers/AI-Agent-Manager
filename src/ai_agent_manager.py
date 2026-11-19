@@ -17,6 +17,7 @@ from collections import deque
 from codex_profiles import choose_profile, profile_environment
 from session_optimizer import settings as optimization_settings, after_turn, analytics, cache_policy, rotation_handoff, compact_history, write_checkpoint, load_checkpoint
 from aam_runtime import bounded_stream_runner, repository_fingerprint, handoff_delta, model_for_session
+from codex_app_server import run_codex_app_server
 from aam_tui import RichTurn, rich_available, provider_model
 from smart_router import route as smart_route
 
@@ -324,7 +325,9 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
     if tool == 'codex' and on_event is None:
         print(f'[aam] Codex environment profile: {profile}', file=sys.stderr)
     with profile_environment(profile, env) as runtime_env:
-        if runner is stream_runner:
+        if tool == 'codex' and on_event is not None and runner is stream_runner:
+            completed = run_codex_app_server(str(root), actual_prompt, sid, model, runtime_env, on_event, cancel_event)
+        elif runner is stream_runner:
             completed = runner(cmd, cwd=str(root), tool=tool, model=model or 'default', env=runtime_env, on_event=on_event, cancel_event=cancel_event)
         else:
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
