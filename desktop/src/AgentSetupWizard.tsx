@@ -84,7 +84,12 @@ export default function AgentSetupWizard() {
     void listen<{ text: string; finished: boolean }>('provider-login-output', event => {
       if (disposed) return;
       if (event.payload.text) setTerminalOutput(previous => (previous + event.payload.text).slice(-16000));
-      if (event.payload.finished) setTerminalOpen(false);
+      if (event.payload.finished) {
+        setTerminalOpen(false);
+        // The PTY exiting does not prove login succeeded. Recheck explicitly.
+        void invoke<ProviderStatus[]>('provider_setup_status').then(setStatuses).catch(() => {});
+        void invoke('focus_after_login').catch(() => {});
+      }
     }).then(fn => { if (disposed) fn(); else unlisten = fn; }).catch(e => setError(String(e)));
     return () => { disposed = true; unlisten?.(); };
   }, []);
