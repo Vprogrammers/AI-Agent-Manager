@@ -745,12 +745,10 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
 // A failure is replay-safe only if it happened before the agent process started.
 // Runtime errors are deliberately not eligible: even read-only prompts can
 // invoke external tools with side effects.
-fn retry_after_failure(automatic: bool, permission: &str, error: &str) -> bool {
-    if !automatic { return false; }
-    if retry_before_spawn(error) { return true; }
-    // A read-only filesystem does not prevent network or subprocess side effects.
-    // Retry only errors positively identified as occurring before task execution.
-    error.starts_with("PREEXEC:")
+fn retry_after_failure(automatic: bool, _permission: &str, error: &str) -> bool {
+    // Only the launcher can prove no agent code ran. A provider's error message
+    // cannot prove absence of tool calls, writes, or network side effects.
+    automatic && retry_before_spawn(error)
 }
 
 fn retry_before_spawn(error: &str) -> bool {
@@ -769,15 +767,33 @@ mod execution_fallback_tests {
         }
     }
     #[test]
-    fn runtime_fallback_requires_read_only_and_auto_mode() {
+    fn runtime_fallback_is_never_automatic_after_spawn() {
         use super::retry_after_failure;
-        assert!(retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
+        assert!(!retry_after_failure(true, "read-only", "PREEXEC: provider rejected request"));
         assert!(retry_after_failure(true, "workspace-write", "PRESTART: failed to spawn"));
         assert!(!retry_after_failure(true, "workspace-write", "CLI failed"));
         assert!(!retry_after_failure(true, "read-only", "CLI failed"));
         assert!(!retry_after_failure(false, "read-only", "CLI failed"));
         assert!(!retry_after_failure(true, "read-only", "Request cancelled"));
         assert!(!retry_after_failure(true, "read-only", "Request timed out after 10 minutes"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_permissions_limit_workspace_writes() {
+        use super::macos_sandbox_profile;
+        use std::path::Path;
+        let root = Path::new("/tmp/aam-test");
+        let read_only = macos_sandbox_profile(root, "read-only").unwrap();
+        let write = macos_sandbox_profile(root, "workspace-write").unwrap();
+        assert!(!read_only.contains("(subpath \\"/tmp/aam-test\\")"));
+        assert!(write.contains("(subpath \\"/tmp/aam-test\\")"));
+        assert!(macos_sandbox_profile(root, "full-access").is_err());
+    }
+    #[test]
+    fn unsupported_permissions_fail_closed() {
+        assert!(!super::external_sandbox_ready("full-access"));
+        assert!(!super::external_sandbox_ready("unknown"));
     }
 
 }
