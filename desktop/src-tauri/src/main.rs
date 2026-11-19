@@ -242,20 +242,12 @@ fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::St
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
         "claude" => ("claude", &["auth", "login"]),
         "codex" => ("codex", &["login"]),
-        "antigravity" => ("antigravity", &[]),
+        "antigravity" => ("agy", &[]),
         "opencode" => ("opencode", &["auth", "login"]),
         "copilot" => ("copilot", &["login"]),
         _ => return Err("Unsupported provider".into()),
     };
-    let executable = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).flat_map(|p| {
-            let mut candidates = vec![p.join(binary)];
-            if cfg!(windows) {
-                for ext in ["exe", "cmd", "bat"] { candidates.push(p.join(format!("{binary}.{ext}"))); }
-            }
-            candidates
-        }).find(|p| p.is_file())
-    }).ok_or("Provider CLI not found. Recheck installation first.")?;
+    let executable = find_cli(binary).ok_or("Provider CLI not found. Recheck installation first.")?;
     if state.0.lock().map_err(|_| "Login session unavailable")?.is_some() {
         return Err("A login is already in progress. Cancel the previous login first.".into());
     }
@@ -316,17 +308,7 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
         ("opencode", "opencode", vec!["auth", "list"]),
         ("copilot", "copilot", vec!["--version"]),
     ] {
-        let executable = std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths).flat_map(|p| {
-                let mut candidates = vec![p.join(binary)];
-                if cfg!(windows) {
-                    for ext in ["exe", "cmd", "bat"] {
-                        candidates.push(p.join(format!("{binary}.{ext}")));
-                    }
-                }
-                candidates
-            }).find(|p| p.is_file())
-        });
+        let executable = find_cli(binary);
         let Some(executable) = executable else {
             result.push(ProviderSetup { id: id.into(), installed: false, authenticated: false,
                 auth_status: "missing".into(), detail: "CLI not found in PATH".into() });
@@ -552,21 +534,13 @@ where
 
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
-        "antigravity" => ("antigravity", vec!["-p", prompt, "--output-format", "json"]),
+        "antigravity" => ("agy", vec!["--print", prompt]),
         "opencode" => ("opencode", vec!["run", prompt]),
         "copilot" => ("copilot", vec!["-p", prompt, "-s", "--no-ask-user"]),
         _ => return Err("Unsupported provider".into()),
     };
     external_provider_preflight(provider, permission)?;
-    let executable = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths).flat_map(|p| {
-            let mut candidates = vec![p.join(binary)];
-            if cfg!(windows) {
-                for ext in ["exe", "cmd", "bat"] { candidates.push(p.join(format!("{binary}.{ext}"))); }
-            }
-            candidates
-        }).find(|p| p.is_file())
-    }).ok_or(format!("{provider} CLI not found in PATH"))?;
+    let executable = find_cli(binary).ok_or(format!("{provider} CLI not found in PATH"))?;
     let mut command = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
     command.current_dir(root).stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
@@ -712,14 +686,27 @@ fn set_provider_cooldown(id: &str, cooldowns: &ProviderCooldowns) {
     }
 }
 
+fn find_cli(binary: &str) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    // GUI applications on macOS may not inherit the interactive shell PATH.
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".local/bin"));
+    }
+    dirs.into_iter().flat_map(|dir| {
+        let mut candidates = vec![dir.join(binary)];
+        if cfg!(windows) {
+            for ext in ["exe", "cmd", "bat"] {
+                candidates.push(dir.join(format!("{binary}.{ext}")));
+            }
+        }
+        candidates
+    }).find(|path| path.is_file())
+}
+
 fn cli_on_path(binary: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| {
-            if dir.join(binary).is_file() { return true; }
-            cfg!(windows) && ["exe", "cmd", "bat"].iter()
-                .any(|ext| dir.join(format!("{binary}.{ext}")).is_file())
-        })
-    })
+    find_cli(binary).is_some()
 }
 
 async fn verified_auth_probe(provider: &str) -> Option<bool> {
