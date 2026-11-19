@@ -31,16 +31,20 @@ def summarize(samples):
     for s in good:
         spawn = s.get("spawn_ms")
         first = s.get("first_stdout_ms")
+        first_stderr = s.get("first_stderr_ms")
         total = s.get("total_ms")
         for key, value in {
             "spawn_ms": spawn,
             "cli_to_first_stdout_ms": max(0, first - spawn) if first is not None and spawn is not None else None,
+            "cli_to_first_stderr_ms": max(0, first_stderr - spawn) if first_stderr is not None and spawn is not None else None,
             "first_stdout_to_exit_ms": max(0, total - first) if first is not None and total is not None else None,
             "total_ms": total,
         }.items():
             if value is not None:
                 phases.setdefault(key, []).append(value)
     return {"successful": len(good), "attempts": len(samples),
+            "first_stdout_observed": sum(s.get("first_stdout_ms") is not None for s in good),
+            "first_stderr_observed": sum(s.get("first_stderr_ms") is not None for s in good),
             "phases_median_ms": {k: median(v) for k, v in phases.items()},
             "timeouts": sum(bool(s.get("timeout")) for s in samples),
             "failed": sum(s.get("exit_code") not in (0, None) for s in samples)}
