@@ -844,6 +844,11 @@ fn retry_before_spawn(error: &str) -> bool {
     error.starts_with("PRESTART:")
 }
 
+// A provider handoff must account for edits made by the previous provider.
+fn continuation_prompt(original: &str) -> String {
+    format!("Continue the user's task from the CURRENT repository state. Inspect git status and diff first; do not repeat completed edits or operations. Original request:\n{original}")
+}
+
 #[cfg(test)]
 mod execution_fallback_tests {
     use super::retry_before_spawn;
@@ -854,6 +859,13 @@ mod execution_fallback_tests {
             "authentication required", "CLI failed", "spawned process failed"] {
             assert!(!retry_before_spawn(message));
         }
+    }
+    #[test]
+    fn continuation_preserves_original_request_and_requires_state_review() {
+        let prompt = super::continuation_prompt("Update src/main.rs");
+        assert!(prompt.contains("Inspect git status and diff first"));
+        assert!(prompt.contains("do not repeat completed edits"));
+        assert!(prompt.contains("Update src/main.rs"));
     }
     #[test]
     fn fallback_requires_proven_pre_execution_failure() {
@@ -947,7 +959,7 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         // Provider limits trigger a continuation on the next available provider.
         let continuation_prompt;
         let active_prompt = if continue_after_limit {
-            continuation_prompt = format!("Continue the user's task from the CURRENT repository state. Inspect git status and diff first; do not repeat completed edits or operations. Original request:\n{prompt}");
+            continuation_prompt = continuation_prompt(&prompt);
             continuation_prompt.as_str()
         } else { prompt.as_str() };
         match execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await {
