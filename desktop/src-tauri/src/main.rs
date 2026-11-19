@@ -576,7 +576,15 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
                 return Err(format!("{provider} rate limit confirmed. Cooldown 5 minutes. Automatic replay blocked because the CLI may have modified files."));
             }
             if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
-            return Err(format!("{provider} CLI failed. Check provider authentication and permissions."));
+            let exit_code = output.status.code().map(|code| code.to_string()).unwrap_or_else(|| "signal".into());
+            eprintln!("AAM external provider failed: provider={provider}, exit={exit_code}, classification={kind}, permission={permission}");
+            let hint = match provider {
+                "opencode" => "OpenCode failed. Verify its configured model/provider and whether it works non-interactively with 'opencode run'.",
+                "copilot" => "Copilot failed. GitHub device login alone does not confirm Copilot access; verify 'copilot -p' works in your terminal.",
+                "antigravity" => "Antigravity failed. Verify 'agy --print' works non-interactively in the same workspace.",
+                _ => "Provider CLI failed. Check its configuration and permissions.",
+            };
+            return Err(format!("{hint} (exit: {exit_code}, category: {kind})"));
         }
         if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
         let text = String::from_utf8_lossy(&output.stdout);
