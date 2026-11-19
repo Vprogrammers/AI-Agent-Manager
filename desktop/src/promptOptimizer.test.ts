@@ -1,4 +1,4 @@
-import { analyzePrompt, isDirectCommand, recommendedStrategy, emptyFeedback, validateSuggestion, promptDiff, followupContext } from './promptOptimizer';
+import { analyzePrompt, isDirectCommand, recommendedStrategy, emptyFeedback, validateSuggestion, promptDiff, followupContext, dedupeGuidance, compareExecutionEvidence } from './promptOptimizer';
 
 function assert(condition:boolean, message:string):void {if(!condition)throw Error(message);}
 assert(isDirectCommand('git status'),'git status must bypass expansion');
@@ -19,3 +19,7 @@ assert(!validateSuggestion('Do not delete files','Delete files').safe,'unsafe ed
 assert(promptDiff('fix login','fix login\nrun tests').added.length===1,'diff additions');
 assert(followupContext('Now add tests','Implement login').includes('Implement login'),'followup reference');
 assert(analyzePrompt('Implement login',[],[],'detailed',false,'codex','',0).unchanged,'zero budget');
+
+assert(dedupeGuidance(['Run tests','Execute tests']).length===1,'semantic alias dedup');
+assert(compareExecutionEvidence({testsPassed:5,testsFailed:1},{testsPassed:6,testsFailed:0}).verdict==='better','quality evidence comparison');
+assert(compareExecutionEvidence({},{testsPassed:1,testsFailed:0}).verdict==='inconclusive','missing evidence must not claim improvement');
