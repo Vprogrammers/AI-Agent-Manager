@@ -29,4 +29,4 @@ jobs:
         run: npm run build
       - name: Rust unit tests
         working-directory: desktop/src-tauri
-        run: cargo test --locked
+        run: cargo test
