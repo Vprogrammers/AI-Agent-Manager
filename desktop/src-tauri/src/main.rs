@@ -399,7 +399,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             // CLI diagnostics can contain credentials, prompts, or private paths.
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let diagnostic = format!("{} {}", &stderr[..stderr.floor_char_boundary(stderr.len().min(8192))], &stdout[..stdout.floor_char_boundary(stdout.len().min(8192))]);
+            let diagnostic = format!("{} {}", stderr.chars().take(8192).collect::<String>(), stdout.chars().take(8192).collect::<String>());
             let kind = classify_agent_error(&diagnostic);
             if kind == "rate_limit" {
                 set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
