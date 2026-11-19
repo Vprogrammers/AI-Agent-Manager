@@ -7,6 +7,22 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
 from aam_runtime import handoff_delta, model_for_session, repository_fingerprint
 from session_optimizer import load_checkpoint, write_checkpoint, settings
 
+class LimitClassificationTests(unittest.TestCase):
+    def test_successful_claude_answer_mentioning_quota_is_not_a_limit(self):
+        from ai_agent_manager import limit_summary
+        import json
+        response = json.dumps({"type": "result", "is_error": False,
+                               "session_id": "test", "result": "Explain HTTP 429 and quota exceeded"})
+        self.assertIsNone(limit_summary("claude", response, ""))
+
+    def test_explicit_claude_quota_error_is_detected(self):
+        from ai_agent_manager import limit_summary
+        import json
+        response = json.dumps({"type": "result", "is_error": True,
+                               "result": "rate limit exceeded"})
+        self.assertIsNotNone(limit_summary("claude", response, ""))
+
+
 class DesktopStreamingTests(unittest.TestCase):
     def test_claude_desktop_command_uses_partial_streaming(self):
         import os
