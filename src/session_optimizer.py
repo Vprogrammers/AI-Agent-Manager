@@ -92,9 +92,18 @@ def analytics(path):
         row['seconds'] += float(entry.get('duration_seconds', 0))
     return totals
 
+def independent_request(prompt):
+    """Short, self-contained requests do not need a long native session."""
+    import re
+    normalized = prompt.strip().lower()
+    if re.fullmatch(r'(?:run|execute|pokreni|izvrši|izvrsi|proveri|provjeri)?\\s*git\\s+(?:status(?:\\s+-[a-z]+)?|branch(?:\\s+--show-current)?|rev-parse\\s+--abbrev-ref\\s+HEAD)', normalized):
+        return True
+    return False
+
+
 def cache_policy(state, tool, profile, prompt, env):
     """Rotate a native session after a large reported input turn."""
-    if env.get('AAM_FORCE_NEW_SESSION') == '1':
+    if env.get('AAM_FORCE_NEW_SESSION') == '1' or independent_request(prompt):
         return None
     key = f'{tool}:{profile}' if tool == 'codex' else tool
     sid = state.get('sessions', {}).get(key)
