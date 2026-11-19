@@ -505,7 +505,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         state.0.lock().map_err(|_| "Request state unavailable")?.insert(request_id.into(), stop.clone());
     }
     let result = async {
-        let child = command.spawn().map_err(|_| format!("Could not start {provider} CLI"))?;
+        let child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
         let output = tokio::select! {
             output = tokio::time::timeout(std::time::Duration::from_secs(600), child.wait_with_output()) => {
                 output.map_err(|_| "Agent timed out".to_string())?.map_err(|_| "Agent process failed".to_string())?
@@ -682,7 +682,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     child.env("AAM_PERMISSION_MODE", permission);
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    let mut child = child.spawn().map_err(|e| format!("Cannot launch aam: {e}"))?;
+    let mut child = child.spawn().map_err(|e| format!("PRESTART: Cannot launch aam: {e}"))?;
     let stop = Arc::new(tokio::sync::Notify::new());
     {
         let state = app.state::<RunningRequests>();
@@ -747,6 +747,26 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     result.map(|_| ())
 }
 
+// A failure is replay-safe only if it happened before the agent process started.
+// Runtime errors are deliberately not eligible: even read-only prompts can
+// invoke external tools with side effects.
+fn retry_before_spawn(error: &str) -> bool {
+    error.starts_with("PRESTART:")
+}
+
+#[cfg(test)]
+mod execution_fallback_tests {
+    use super::retry_before_spawn;
+    #[test]
+    fn only_prestart_errors_allow_fallback() {
+        assert!(retry_before_spawn("PRESTART: executable missing"));
+        for message in ["Agent timed out", "rate limit", "Request cancelled",
+            "authentication required", "CLI failed", "spawned process failed"] {
+            assert!(!retry_before_spawn(message));
+        }
+    }
+}
+
 async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, adapter: ProviderAdapter, prompt: &str, permission: &str) -> Result<(), String> {
     validate_execution(adapter, permission)?;
     let result = match adapter.transport {
@@ -797,7 +817,13 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         }}));
         // An adapter that has started may have modified files or emitted effects.
         // Never replay such a task automatically, even if it reports a rate limit.
-        return execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await;
+        match execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await {
+            Err(message) if automatic && retry_before_spawn(&message) => {
+                last_preflight_error = message;
+                continue;
+            }
+            outcome => return outcome,
+        }
     }
     Err(last_preflight_error)
 }
