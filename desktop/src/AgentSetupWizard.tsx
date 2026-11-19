@@ -113,7 +113,7 @@ export default function AgentSetupWizard() {
   const perform = async (id: ProviderId, action: 'install' | 'login') => {
     if (action === 'install' && !window.confirm('Install ' + setup[id].name + ' globally using npm? This downloads software from the npm registry and changes your system environment.')) return;
     setWorking(id); setError(''); setNotice('');
-    if (action === 'login') { setTerminalOutput(''); setTerminalOpen(true); }
+    setTerminalOutput(''); setTerminalOpen(true);
     try {
       const message = await invoke<string>(action === 'install' ? 'install_provider_cli' : 'open_provider_login', { provider: id });
       if (action === 'install') {
@@ -177,6 +177,16 @@ export default function AgentSetupWizard() {
         </div>
         {error && <p role="alert" className="error">{error}{error.includes('already in progress') && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setError('Login interruption requested. Retry when the previous session closes.'); } catch (e) { setError(String(e)); } }}>Cancel previous login</button>}</p>}
         {notice && <p role="status" className="hint">{notice}</p>}
+        {(terminalOpen || terminalOutput) && <div className="setup-provider" aria-label="Embedded provider login terminal">
+          <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
+          <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
+          {terminalOpen && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setNotice('Login interruption requested. Wait for the terminal to close before retrying.'); } catch (e) { setError(String(e)); } }}>Cancel active login</button>}
+          {terminalOpen && <form onSubmit={e => { e.preventDefault(); void sendTerminalInput(); }} className="setup-terminal-input">
+            <input aria-label="Terminal input" type="text" value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Enter CLI response, if requested" autoComplete="off" />
+            <button type="submit">Send</button>
+          </form>}
+          <p className="hint">OAuth may open your default browser. Never enter passwords or recovery codes in this terminal; authenticate on the provider's official page.</p>
+        </div>}
         <div className="setup-provider">
           <h3>Node.js + npm <span className={node?.installed ? 'setup-ready' : 'setup-needed'}>{node?.installed ? 'Ready' : 'Required for CLI installation'}</span></h3>
           <p className="hint">{node?.detail || 'Checking Node.js…'} · Installer: {node?.installer || 'detecting…'}</p>
@@ -198,16 +208,6 @@ export default function AgentSetupWizard() {
             </div>;
           })}
         </div>
-        {(terminalOpen || terminalOutput) && <div className="setup-provider" aria-label="Embedded provider login terminal">
-          <h3>Interactive login {terminalOpen ? '· running' : '· finished'}</h3>
-          <pre className="setup-terminal" aria-live="off">{terminalOutput || 'Waiting for provider login…'}</pre>
-          {terminalOpen && <button type="button" onClick={async () => { try { await invoke('cancel_provider_login'); setNotice('Login interruption requested. Wait for the terminal to close before retrying.'); } catch (e) { setError(String(e)); } }}>Cancel active login</button>}
-          {terminalOpen && <form onSubmit={e => { e.preventDefault(); void sendTerminalInput(); }} className="setup-terminal-input">
-            <input aria-label="Terminal input" type="text" value={terminalInput} onChange={e => setTerminalInput(e.target.value)} placeholder="Enter CLI response, if requested" autoComplete="off" />
-            <button type="submit">Send</button>
-          </form>}
-          <p className="hint">OAuth may open your default browser. Never enter passwords or recovery codes in this terminal; authenticate on the provider's official page.</p>
-        </div>}
         <div className="setup-actions">
           <button type="button" onClick={() => void refresh()} disabled={checking}>{checking ? 'Checking…' : 'Recheck installation and login'}</button>
           <button type="button" onClick={() => { setDismissed(true); setOpen(false); }}>{ready ? 'Continue' : 'Skip for now'}</button>
