@@ -32,6 +32,9 @@ jobs:
       - name: Build real engine sidecar
         working-directory: desktop
         run: npm run bundle:engine
+      - name: Generate Tauri icons from source SVG
+        working-directory: desktop
+        run: npm run icons
       - name: Rust unit tests
         working-directory: desktop/src-tauri
         run: cargo test
