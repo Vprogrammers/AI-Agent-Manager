@@ -844,6 +844,21 @@ fn retry_before_spawn(error: &str) -> bool {
     error.starts_with("PRESTART:")
 }
 
+// Reject automatic handoff when a provider may have modified repository files.
+fn workspace_fingerprint(root: &Path) -> Result<Vec<u8>, String> {
+    let status = Command::new("git").arg("-C").arg(root)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output().map_err(|e| format!("Cannot inspect workspace: {e}"))?;
+    if !status.status.success() { return Err("Cannot inspect Git status".into()); }
+    let diff = Command::new("git").arg("-C").arg(root)
+        .args(["diff", "--binary", "HEAD", "--"])
+        .output().map_err(|e| format!("Cannot inspect workspace diff: {e}"))?;
+    if !diff.status.success() { return Err("Cannot inspect Git diff".into()); }
+    let mut fingerprint = status.stdout;
+    fingerprint.extend_from_slice(&diff.stdout);
+    Ok(fingerprint)
+}
+
 // A provider handoff must account for edits made by the previous provider.
 fn continuation_prompt(original: &str) -> String {
     format!("Continue the user's task from the CURRENT repository state. Inspect git status and diff first; do not repeat completed edits or operations. Original request:\n{original}")
@@ -958,14 +973,21 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
             "provider":candidate,"model":"CLI default"
         }}));
         // Provider limits trigger a continuation on the next available provider.
-        let continuation_prompt;
+        let handoff_prompt;
         let active_prompt = if continue_after_limit {
-            continuation_prompt = continuation_prompt(&prompt);
-            continuation_prompt.as_str()
+            handoff_prompt = continuation_prompt(&prompt);
+            handoff_prompt.as_str()
         } else { prompt.as_str() };
+        let before = workspace_fingerprint(&path)?;
         match execute_adapter(&app, &request_id, &path, adapter, active_prompt, &permission).await {
             Err(message) if retry_after_failure(automatic, &permission, &message) => {
-                continue_after_limit |= message.contains("rate limit detected");
+                if message.contains("rate limit detected") {
+                    let after = workspace_fingerprint(&path)?;
+                    if before != after {
+                        return Err(format!("{candidate} reached a limit after modifying the workspace. Review Git changes and resume explicitly; automatic failover blocked."));
+                    }
+                    continue_after_limit = true;
+                }
                 last_preflight_error = message;
                 let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
                     "kind":"routing","provider":candidate,
