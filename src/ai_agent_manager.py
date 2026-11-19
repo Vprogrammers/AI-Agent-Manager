@@ -155,6 +155,22 @@ def usage_from_output(tool, output):
 
 
 
+
+def observed_model_activity(tool, output):
+    """Report only model activity explicitly observable in provider CLI output."""
+    if tool == 'claude':
+        try:
+            obj = json.loads(output)
+        except (ValueError, TypeError):
+            return {}
+        # num_turns is an agent-turn counter, NOT a count of API model calls.
+        count = obj.get('num_turns') if isinstance(obj, dict) else None
+        return {'agent_turns': count} if type(count) is int and count >= 0 else {}
+    # Codex exec JSON emits turn.completed for the whole request, not each model call.
+    # Do not misrepresent turn.completed as an internal model invocation.
+    return {}
+
+
 def usage_diagnostics(root, tool, output, reused_session, usage):
     """Record only numeric usage metadata; never store prompts or provider output."""
     events = []
@@ -174,6 +190,7 @@ def usage_diagnostics(root, tool, output, reused_session, usage):
     entry = {
         'utc': datetime.now(timezone.utc).isoformat(),
         'provider': tool,
+        'observed_model_activity': observed_model_activity(tool, output),
         'session_reused': bool(reused_session),
         'usage_source': 'codex.turn.completed' if tool == 'codex' else 'claude.result',
         'events': events,
@@ -300,6 +317,7 @@ def run_turn(root, tool, prompt, state, env=None, runner=None, on_event=None, ca
             completed = runner(cmd, cwd=str(root), capture_output=True, text=True, env=runtime_env)
     elapsed = time.monotonic() - start
     usage = usage_from_output(tool, completed.stdout)
+    usage.update(observed_model_activity(tool, completed.stdout))
     state['last_usage'] = usage
     if usage.get('input_tokens') is not None:
         state.setdefault('session_input_tokens', {})[session_key] = usage['input_tokens']
