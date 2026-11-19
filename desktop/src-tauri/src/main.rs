@@ -592,10 +592,17 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     });
     let mut lines = BufReader::new(stdout).lines();
     let mut cancelled = false;
+    let mut reported_limit = false;
     let result = tokio::select! {
         outcome = tokio::time::timeout(std::time::Duration::from_secs(600), async {
             while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if event.get("kind").and_then(|v| v.as_str()) == Some("error") {
+                        let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        if classify_agent_error(message) == "rate_limit" {
+                            reported_limit = true;
+                        }
+                    }
                     let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
                 }
             }
@@ -617,8 +624,17 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
     }
     let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
+    if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
+        set_provider_cooldown(&selected, &app.state::<ProviderCooldowns>());
+    }
     if result.as_ref().is_ok_and(|status| !status.success()) {
-        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":stderr}}));
+        let message = if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
+            format!("{selected} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
+        } else if classify_agent_error(&stderr) == "auth_required" {
+            format!("{selected} authentication required.")
+        } else { format!("{selected} engine exited unsuccessfully. Check CLI diagnostics.") };
+        let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
+        return Err(message);
     }
     result.map(|_| ())
 }
