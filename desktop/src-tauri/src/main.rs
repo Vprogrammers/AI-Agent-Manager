@@ -734,6 +734,8 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
     let mut child = sandbox_command(&executable, &args, root, permission).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
+    // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
+    child.env("AAM_OUTER_SANDBOX", "1");
     child.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
     #[cfg(unix)]
