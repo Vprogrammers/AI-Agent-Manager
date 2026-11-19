@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
-from session_optimizer import after_turn, analytics, cache_policy, compact_history, settings, write_checkpoint, context_observation
+from session_optimizer import after_turn, analytics, cache_policy, rotation_handoff, compact_history, settings, write_checkpoint, context_observation
 
 class OptimizerTests(unittest.TestCase):
     def test_context_is_observation_not_cumulative(self):
@@ -26,6 +26,22 @@ class OptimizerTests(unittest.TestCase):
         state = {'sessions': {'codex:coding': 'abc'}}
         self.assertEqual(cache_policy(state, 'codex', 'coding', 'hello', {}), 'abc')
         self.assertIsNone(cache_policy(state, 'codex', 'coding', 'hello', {'AAM_FORCE_NEW_SESSION': '1'}))
+
+    def test_rotates_oversized_session(self):
+        state = {'sessions': {'codex:coding': 'old'}, 'session_input_tokens': {'codex:coding': 707181}}
+        self.assertIsNone(cache_policy(state, 'codex', 'coding', 'git status -sb', {}))
+        self.assertEqual(cache_policy(state, 'codex', 'coding', 'git status -sb',
+                                      {'AAM_AUTO_ROTATE_SESSIONS': '0'}), 'old')
+        self.assertEqual(cache_policy(state, 'codex', 'coding', 'git status -sb',
+                                      {'AAM_SESSION_ROTATE_TOKENS': '900000'}), 'old')
+
+    def test_rotation_only_carries_context_for_followups(self):
+        state = {'history': [{'tool': 'codex', 'prompt': 'analyze budget',
+                              'answer': 'Found pricing issue'}]}
+        self.assertEqual(rotation_handoff(state, 'codex', 'git status -sb'), 'git status -sb')
+        followup = rotation_handoff(state, 'codex', 'a sada proveri')
+        self.assertIn('Found pricing issue', followup)
+        self.assertIn('a sada proveri', followup)
 
     def test_bounded_handoff(self):
         state = {'history': [{'prompt': 'x'*1000}]}
