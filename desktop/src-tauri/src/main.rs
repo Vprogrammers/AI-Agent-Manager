@@ -522,6 +522,20 @@ fn cli_on_path(binary: &str) -> bool {
     })
 }
 
+async fn verified_auth_probe(provider: &str) -> Option<bool> {
+    let args: &[&str] = match provider {
+        "claude" => &["auth", "status"],
+        "codex" => &["login", "status"],
+        // Do not mistake --version or auth-list exit status for an authenticated session.
+        _ => return None,
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8),
+        tokio::process::Command::new(provider).args(args)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()).kill_on_drop(true).status()).await;
+    Some(matches!(result, Ok(Ok(status)) if status.success()))
+}
+
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
     if !["claude", "codex", "gemini", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
@@ -534,9 +548,14 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     let selected = if provider == "auto" || provider == "balanced" {
         let candidates = route_candidates(&prompt, &provider, &permission);
         let cooldowns = app.state::<ProviderCooldowns>();
-        let chosen = candidates.into_iter()
-            .find(|id| cli_on_path(id) && provider_available(id, &cooldowns))
-            .ok_or("No compatible agent CLI is available for the requested permission mode")?;
+        let mut chosen = None;
+        for candidate in candidates {
+            if !cli_on_path(candidate) || !provider_available(candidate, &cooldowns) { continue; }
+            if verified_auth_probe(candidate).await == Some(false) { continue; }
+            chosen = Some(candidate);
+            break;
+        }
+        let chosen = chosen.ok_or("No compatible agent CLI available: check installation, authentication and cooldown")?;
         let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
             "kind":"routing","reason":format!("Task-based routing selected {chosen}; available CLI detected"),"model":"CLI default"
         }}));
