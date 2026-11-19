@@ -383,11 +383,11 @@ fn external_provider_preflight(provider: &str, permission: &str) -> Result<(), S
 #[cfg(target_os = "macos")]
 fn macos_sandbox_profile(root: &Path) -> Result<String, String> {
     let path = root.to_str().ok_or("Workspace path is not UTF-8")?;
-    if path.chars().any(|c| c == '\\0' || c == '\\n' || c == '\\r') {
+    if path.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
         return Err("Unsupported workspace path".into());
     }
     let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
-    Ok(format!("(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath \\"{escaped}\\") (subpath \\"/private/tmp\\") (subpath \\"/tmp\\") (literal \\"/dev/null\\"))"))
+    Ok(format!(r#"(version 1) (deny default) (allow process*) (allow sysctl-read) (allow mach-lookup) (allow network*) (allow file-read*) (allow file-write* (subpath "{escaped}") (subpath "/private/tmp") (subpath "/tmp") (literal "/dev/null"))"#))
 }
 
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
