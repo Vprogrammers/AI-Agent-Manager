@@ -707,10 +707,12 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     });
     let mut lines = BufReader::new(stdout).lines();
     let mut reported_limit = false;
+    let mut reported_error = false;
     let result = await_runtime(async {
         while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
             if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
                 if event.get("kind").and_then(|v| v.as_str()) == Some("error") {
+                    reported_error = true;
                     let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
                     if classify_agent_error(message) == "rate_limit" {
                         reported_limit = true;
@@ -731,7 +733,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
         set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
     }
-    if result.as_ref().is_ok_and(|status| !status.success()) {
+    if reported_error || result.as_ref().is_ok_and(|status| !status.success()) {
         let message = if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
             format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
         } else if classify_agent_error(&stderr) == "auth_required" {
