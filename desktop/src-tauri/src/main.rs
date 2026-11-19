@@ -660,52 +660,18 @@ async fn verified_auth_probe(provider: &str) -> Option<bool> {
 }
 
 #[tauri::command]
-async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
-    if !["claude", "codex", "gemini", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
-    if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
-    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
-    let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
-    if !path.is_dir() { return Err("Workspace is not a directory".into()); }
-    let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
-    if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
-    let selected = if provider == "auto" || provider == "balanced" {
-        let candidates = route_candidates(&prompt, &provider, &permission);
-        let cooldowns = app.state::<ProviderCooldowns>();
-        let mut chosen = None;
-        for candidate in candidates {
-            let Some(adapter) = provider_adapter(candidate) else { continue; };
-            if !provider_available(candidate, &cooldowns) { continue; }
-            if validate_execution(adapter, &permission).is_err() { continue; }
-            if verified_auth_probe(candidate).await == Some(false) { continue; }
-            chosen = Some(candidate);
-            break;
-        }
-        let chosen = chosen.ok_or("No compatible agent CLI available: check installation, authentication and cooldown")?;
-        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
-            "kind":"routing","reason":format!("Task-based routing selected {chosen}; preflight passed"),"model":"CLI default"
-        }}));
-        chosen.to_string()
-    } else { provider.clone() };
-    let adapter = provider_adapter(&selected).ok_or("Unknown execution adapter")?;
-    validate_execution(adapter, &permission)?;
-    if adapter.transport == ExecutionAdapter::SandboxedCli {
-        let result = run_external_provider(&app, &request_id, &path, adapter.id, &prompt, &permission).await;
-        if let Err(ref message) = result {
-            let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{"kind":"process_error","message":message}}));
-        }
-        return result;
-    }
+async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str) -> Result<(), String> {
     let mut child = tokio::process::Command::new(aam_executable()?);
-    child.env("AAM_PERMISSION_MODE", &permission);
-    child.arg(&selected).arg("--root").arg(&path).arg("--desktop-jsonl")
-        .arg("--ui").arg("classic").arg("--prompt").arg(&prompt)
+    child.env("AAM_PERMISSION_MODE", permission);
+    child.arg(provider).arg("--root").arg(root).arg("--desktop-jsonl")
+        .arg("--ui").arg("classic").arg("--prompt").arg(prompt)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let mut child = child.spawn().map_err(|e| format!("Cannot launch aam: {e}"))?;
     let stop = Arc::new(tokio::sync::Notify::new());
     {
         let state = app.state::<RunningRequests>();
-        state.0.lock().map_err(|_|"Request state unavailable")?.insert(request_id.clone(),stop.clone());
+        state.0.lock().map_err(|_|"Request state unavailable")?.insert(request_id.to_string(),stop.clone());
     }
     let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
     let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
@@ -745,25 +711,73 @@ async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, pro
     }
     {
         let state = app.state::<RunningRequests>();
-        if let Ok(mut requests) = state.0.lock() { requests.remove(&request_id); };
+        if let Ok(mut requests) = state.0.lock() { requests.remove(request_id); };
     }
     if let Err(message) = result.as_ref() {
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
     }
     let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
     if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
-        set_provider_cooldown(&selected, &app.state::<ProviderCooldowns>());
+        set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
     }
     if result.as_ref().is_ok_and(|status| !status.success()) {
         let message = if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
-            format!("{selected} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
+            format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
         } else if classify_agent_error(&stderr) == "auth_required" {
-            format!("{selected} authentication required.")
-        } else { format!("{selected} engine exited unsuccessfully. Check CLI diagnostics.") };
+            format!("{provider} authentication required.")
+        } else { format!("{provider} engine exited unsuccessfully. Check CLI diagnostics.") };
         let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": {"kind":"process_error", "message":message}}));
         return Err(message);
     }
     result.map(|_| ())
+}
+
+}
+
+async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, adapter: ProviderAdapter, prompt: &str, permission: &str) -> Result<(), String> {
+    validate_execution(adapter, permission)?;
+    let result = match adapter.transport {
+        ExecutionAdapter::Engine =>
+            run_engine_adapter(app, request_id, root, adapter.id, prompt, permission).await,
+        ExecutionAdapter::SandboxedCli =>
+            run_external_provider(app, request_id, root, adapter.id, prompt, permission).await,
+    };
+    if let Err(ref message) = result {
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"process_error","provider":adapter.id,"message":message
+        }}));
+    }
+    result
+}
+
+async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
+    if !["claude", "codex", "gemini", "opencode", "copilot", "auto", "balanced"].contains(&provider.as_str()) { return Err("Invalid provider".into()); }
+    if prompt.trim().is_empty() { return Err("Prompt is empty".into()); }
+    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) { return Err("Invalid permission mode".into()); }
+    let path = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    if !path.is_dir() { return Err("Workspace is not a directory".into()); }
+    let status = Command::new("git").args(["-C", path.to_str().ok_or("Invalid path")?, "rev-parse", "--is-inside-work-tree"]).output().map_err(|e| format!("Git: {e}"))?;
+    if !status.status.success() { return Err("Workspace must be a Git repository".into()); }
+    let selected = if provider == "auto" || provider == "balanced" {
+        let candidates = route_candidates(&prompt, &provider, &permission);
+        let cooldowns = app.state::<ProviderCooldowns>();
+        let mut chosen = None;
+        for candidate in candidates {
+            let Some(adapter) = provider_adapter(candidate) else { continue; };
+            if !provider_available(candidate, &cooldowns) { continue; }
+            if validate_execution(adapter, &permission).is_err() { continue; }
+            if verified_auth_probe(candidate).await == Some(false) { continue; }
+            chosen = Some(candidate);
+            break;
+        }
+        let chosen = chosen.ok_or("No compatible agent CLI available: check installation, authentication and cooldown")?;
+        let _ = app.emit("aam-event", serde_json::json!({"requestId":request_id,"data":{
+            "kind":"routing","reason":format!("Task-based routing selected {chosen}; preflight passed"),"model":"CLI default"
+        }}));
+        chosen.to_string()
+    } else { provider.clone() };
+    let adapter = provider_adapter(&selected).ok_or("Unknown execution adapter")?;
+    execute_adapter(&app, &request_id, &path, adapter, &prompt, &permission).await
 }
 
 
