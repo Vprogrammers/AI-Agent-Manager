@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import warnings
 import time
 import unittest
 from unittest import mock
@@ -17,6 +18,19 @@ import diagnose_cli_latency as diag
 
 
 class LatencyRegressionTests(unittest.TestCase):
+    def test_measure_closes_subprocess_pipes_without_resource_warnings(self):
+        command = [sys.executable, "-u", "-c",
+                   "import sys; print('READY'); print('diagnostic', file=sys.stderr)"]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            for _ in range(3):
+                sample = bench.measure(command, Path.cwd(), 5)
+                self.assertEqual(sample["exit_code"], 0)
+        self.assertFalse(
+            [warning for warning in caught if issubclass(warning.category, ResourceWarning)],
+            "benchmark.measure leaked a subprocess pipe",
+        )
+
     def test_first_stdout_is_measured_before_process_exit(self):
         command = [sys.executable, "-u", "-c",
                    "import sys,time; print('READY',flush=True); time.sleep(.25); print('DONE')"]
