@@ -173,6 +173,9 @@ async fn install_provider_cli(provider: String) -> Result<String, String> {
     let package = match provider.as_str() {
         "claude" => "@anthropic-ai/claude-code",
         "codex" => "@openai/codex",
+        "gemini" => "@google/gemini-cli",
+        "opencode" => "@opencode/cli",
+        "copilot" => "@github/copilot",
         _ => return Err("Unsupported provider".into()),
     };
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
@@ -229,6 +232,9 @@ fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::St
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
         "claude" => ("claude", &["auth", "login"]),
         "codex" => ("codex", &["login"]),
+        "gemini" => ("gemini", &[]),
+        "opencode" => ("opencode", &["auth", "login"]),
+        "copilot" => ("copilot", &["login"]),
         _ => return Err("Unsupported provider".into()),
     };
     let executable = std::env::var_os("PATH").and_then(|paths| {
@@ -293,6 +299,9 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
     for (id, binary, args) in [
         ("claude", "claude", vec!["auth", "status"]),
         ("codex", "codex", vec!["login", "status"]),
+        ("gemini", "gemini", vec!["--version"]),
+        ("opencode", "opencode", vec!["auth", "list"]),
+        ("copilot", "copilot", vec!["--version"]),
     ] {
         let executable = std::env::var_os("PATH").and_then(|paths| {
             std::env::split_paths(&paths).flat_map(|p| {
@@ -318,11 +327,22 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null()).kill_on_drop(true).status(),
         ).await;
-        let (authenticated, auth_status, detail) = match status {
-            Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
-            Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
-            Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
-            Err(_) => (false, "unknown", "Authentication check timed out"),
+        // Only Claude and Codex expose the verified auth-status probes used here.
+        // Other CLI exit codes are not evidence of an authenticated account.
+        let (authenticated, auth_status, detail) = if ["gemini", "opencode", "copilot"].contains(&id) {
+            match status {
+                Ok(Ok(exit)) if exit.success() => (false, "unknown", "CLI detected; authentication must be verified in the provider"),
+                Ok(Ok(_)) => (false, "unknown", "CLI detected; login status not independently verified"),
+                Ok(Err(_)) => (false, "unknown", "Could not execute CLI"),
+                Err(_) => (false, "unknown", "CLI probe timed out"),
+            }
+        } else {
+            match status {
+                Ok(Ok(exit)) if exit.success() => (true, "ready", "CLI authentication confirmed"),
+                Ok(Ok(_)) => (false, "login_required", "CLI reports no active authentication or cannot verify it"),
+                Ok(Err(_)) => (false, "unknown", "Could not execute CLI authentication check"),
+                Err(_) => (false, "unknown", "Authentication check timed out"),
+            }
         };
         result.push(ProviderSetup { id: id.into(), installed: true, authenticated,
             auth_status: auth_status.into(), detail: detail.into() });
