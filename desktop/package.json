@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "tauri": "tauri",
     "icons": "tauri icon src-tauri/icons/app-icon.svg",
-    "bundle:engine": "python3 scripts/build-engine.py"
+    "bundle:engine": "python scripts/build-engine.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
