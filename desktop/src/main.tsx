@@ -79,7 +79,7 @@ function describeAgentStep(ev: Record<string,unknown>): AgentStep | null {
   };
   if (type === 'turn.started' || type === 'thread.started') return {time:now,label:'Agent started',status:'running'};
   if (type === 'turn.completed') return {time:now,label:'Agent finished',status:'done'};
-  if (type === 'external.output') return {time:now,label:'CLI output',detail:safeDetail(ev.text),status:'info'};
+  if (type === 'external.output' || type === 'external.chunk') return null;
   if (type === 'item.started' || type === 'item.completed' || type === 'item.updated') {
     if (!labels[itemType]) return null;
     if (type === 'item.updated') return null;
