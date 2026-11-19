@@ -111,3 +111,5 @@ footer.composer>.send-button{flex-shrink:0}
 .agent-step-time{font-variant-numeric:tabular-nums;color:#8194a7;margin-right:12px}
 .agent-step-running{color:#63d6ca!important}
 .agent-step-done{color:#b3c3d1}
+
+.agent-step-detail{font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow-y:auto;background:#101820;border:1px solid #364353;border-radius:6px;padding:8px;margin:5px 0 7px}
