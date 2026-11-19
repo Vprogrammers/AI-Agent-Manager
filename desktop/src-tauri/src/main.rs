@@ -380,7 +380,7 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     }).ok_or(format!("{provider} CLI not found in PATH"))?;
     let mut command = tokio::process::Command::new(executable);
     command.args(args).current_dir(root).stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let stop = Arc::new(tokio::sync::Notify::new());
     {
         let state = app.state::<RunningRequests>();
@@ -394,7 +394,20 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
             },
             _ = stop.notified() => return Err("Request cancelled".into()),
         };
-        if !output.status.success() { return Err(format!("{provider} CLI returned an error. Check authentication and CLI permissions.")); }
+        if !output.status.success() {
+            // Only use diagnostic output for classification. Never return it to the UI:
+            // CLI diagnostics can contain credentials, prompts, or private paths.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let diagnostic = format!("{} {}", &stderr[..stderr.floor_char_boundary(stderr.len().min(8192))], &stdout[..stdout.floor_char_boundary(stdout.len().min(8192))]);
+            let kind = classify_agent_error(&diagnostic);
+            if kind == "rate_limit" {
+                set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
+                return Err(format!("{provider} rate limit confirmed. Cooldown 5 minutes. Automatic replay blocked because the CLI may have modified files."));
+            }
+            if kind == "auth_required" { return Err(format!("{provider} authentication required. Sign in again.")); }
+            return Err(format!("{provider} CLI failed. Check provider authentication and permissions."));
+        }
         if output.stdout.len() > 4_000_000 { return Err("Agent response exceeded output limit".into()); }
         let text = String::from_utf8_lossy(&output.stdout);
         let answer = if provider == "gemini" {
@@ -458,6 +471,15 @@ mod routing_tests {
     }
 
     #[test]
+    fn classifies_provider_limits_without_exposing_output() {
+        use super::classify_agent_error;
+        for text in ["HTTP 429", "Rate limit exceeded", "RESOURCE_EXHAUSTED", "quota exceeded", "too many requests"] {
+            assert_eq!(classify_agent_error(text), "rate_limit");
+        }
+        assert_eq!(classify_agent_error("401 Unauthorized"), "auth_required");
+        assert_eq!(classify_agent_error("Compilation failed"), "unknown");
+    }
+    #[test]
     fn balanced_is_stable() {
         assert_eq!(route_candidates("Explain this", "balanced", "workspace-write")[0], "claude");
     }
@@ -471,6 +493,23 @@ fn provider_available(id: &str, cooldowns: &ProviderCooldowns) -> bool {
     let Ok(mut limits) = cooldowns.0.lock() else { return false; };
     limits.retain(|_, until| *until > std::time::Instant::now());
     !limits.contains_key(id)
+}
+
+fn classify_agent_error(message: &str) -> &'static str {
+    let normalized = message.to_ascii_lowercase();
+    if ["rate limit", "rate_limit", "429", "quota exceeded", "resource_exhausted",
+        "usage limit", "too many requests", "credits exhausted", "limit reached"]
+        .iter().any(|phrase| normalized.contains(phrase)) { "rate_limit" }
+    else if ["unauthorized", "authentication required", "login required",
+        "not logged in", "invalid api key", "401"].iter()
+        .any(|phrase| normalized.contains(phrase)) { "auth_required" }
+    else { "unknown" }
+}
+
+fn set_provider_cooldown(id: &str, cooldowns: &ProviderCooldowns) {
+    if let Ok(mut limits) = cooldowns.0.lock() {
+        limits.insert(id.to_string(), std::time::Instant::now() + std::time::Duration::from_secs(300));
+    }
 }
 
 fn cli_on_path(binary: &str) -> bool {
