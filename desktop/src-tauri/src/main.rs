@@ -788,7 +788,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     }
     if reported_error || result.as_ref().is_ok_and(|status| !status.success()) {
         let message = if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
-            if reported_limit && !observed_execution && result.as_ref().is_ok_and(|status| !status.success()) {
+            if reported_limit && !observed_execution && result.is_ok() {
                 format!("PREEXEC: {provider} rate limit before task execution")
             } else {
                 format!("{provider} rate limit detected; cooldown 5 minutes. Automatic replay blocked.")
