@@ -479,6 +479,18 @@ fn sandbox_command(executable: &Path, args: &[&str], root: &Path) -> Result<toki
     }
 }
 
+// Shared execution deadline and cancellation contract for every adapter.
+async fn await_runtime<T, F>(future: F, stop: Arc<tokio::sync::Notify>) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::select! {
+        outcome = tokio::time::timeout(std::time::Duration::from_secs(600), future) =>
+            outcome.map_err(|_| "Request timed out after 10 minutes".to_string())?,
+        _ = stop.notified() => Err("Request cancelled".into()),
+    }
+}
+
 async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &Path, provider: &str, prompt: &str, permission: &str, stop: Arc<tokio::sync::Notify>) -> Result<(), String> {
     let (binary, args): (&str, Vec<&str>) = match provider {
         "gemini" => ("gemini", vec!["-p", prompt, "--output-format", "json"]),
@@ -501,12 +513,9 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let result = async {
         let child = command.spawn().map_err(|_| format!("PRESTART: Could not start {provider} CLI"))?;
-        let output = tokio::select! {
-            output = tokio::time::timeout(std::time::Duration::from_secs(600), child.wait_with_output()) => {
-                output.map_err(|_| "Agent timed out".to_string())?.map_err(|_| "Agent process failed".to_string())?
-            },
-            _ = stop.notified() => return Err("Request cancelled".into()),
-        };
+        let output = await_runtime(async {
+            child.wait_with_output().await.map_err(|_| "Agent process failed".to_string())
+        }, stop.clone()).await?;
         if !output.status.success() {
             // Only use diagnostic output for classification. Never return it to the UI:
             // CLI diagnostics can contain credentials, prompts, or private paths.
@@ -688,26 +697,22 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         log
     });
     let mut lines = BufReader::new(stdout).lines();
-    let mut cancelled = false;
     let mut reported_limit = false;
-    let result = tokio::select! {
-        outcome = tokio::time::timeout(std::time::Duration::from_secs(600), async {
-            while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if event.get("kind").and_then(|v| v.as_str()) == Some("error") {
-                        let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                        if classify_agent_error(message) == "rate_limit" {
-                            reported_limit = true;
-                        }
+    let result = await_runtime(async {
+        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                if event.get("kind").and_then(|v| v.as_str()) == Some("error") {
+                    let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    if classify_agent_error(message) == "rate_limit" {
+                        reported_limit = true;
                     }
-                    let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
                 }
+                let _ = app.emit("aam-event", serde_json::json!({"requestId": request_id, "data": event}));
             }
-            child.wait().await.map_err(|e| e.to_string())
-        }) => outcome.map_err(|_|"Request timed out after 10 minutes".to_string()).and_then(|r|r),
-        _ = stop.notified() => { cancelled = true; Err("Request stopped by user".to_string()) }
-    };
-    if cancelled || result.is_err() {
+        }
+        child.wait().await.map_err(|e| e.to_string())
+    }, stop.clone()).await;
+    if result.is_err() {
         // kill_on_drop terminates the AAM process; the engine's subprocess handling
         // may need separate process-group cleanup on each supported OS.
         let _ = child.start_kill();
