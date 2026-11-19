@@ -12,6 +12,7 @@ def settings(env):
             return default
     return {
         'context_warning': integer('AAM_CONTEXT_WARNING_TOKENS', 100000),
+        'session_rotate_tokens': integer('AAM_SESSION_ROTATE_TOKENS', 100000),
         'checkpoint_every': integer('AAM_CHECKPOINT_EVERY_TURNS', 8),
         'history_chars': integer('AAM_HANDOFF_HISTORY_CHARS', 4000),
         'summary_chars': integer('AAM_SUMMARY_CHARS', 1200),
@@ -92,11 +93,36 @@ def analytics(path):
     return totals
 
 def cache_policy(state, tool, profile, prompt, env):
-    """Reuse native sessions; no hidden replay or speculative cache invalidation."""
+    """Rotate a native session after a large reported input turn."""
     if env.get('AAM_FORCE_NEW_SESSION') == '1':
         return None
     key = f'{tool}:{profile}' if tool == 'codex' else tool
-    return state.get('sessions', {}).get(key)
+    sid = state.get('sessions', {}).get(key)
+    if env.get('AAM_AUTO_ROTATE_SESSIONS', '1') == '0':
+        return sid
+    observed = state.get('session_input_tokens', {}).get(key, 0)
+    limit = settings(env)['session_rotate_tokens']
+    if sid and limit and type(observed) is int and observed >= limit:
+        return None
+    return sid
+
+
+def rotation_handoff(state, tool, prompt):
+    """Preserve only bounded explicit context for follow-up prompts."""
+    import re
+    followup = re.search(
+        r'\\b(now|again|continue|previous|same|that|this|still|sada|opet|nastavi|prethodn|isto|jos|još|to|ovo|dalje)\\b',
+        prompt, re.I)
+    if not followup:
+        return prompt
+    history = [item for item in state.get('history', []) if item.get('tool') == tool]
+    if not history:
+        return prompt
+    last = history[-1]
+    excerpt = json.dumps({'previous_request': last.get('prompt', '')[:1000],
+                          'previous_answer': last.get('answer', '')[:1500]}, ensure_ascii=False)
+    return ('Fresh session to bound token usage. Recent explicit context; verify against files: '
+            + excerpt + '\\nNEW USER REQUEST:\\n' + prompt)
 
 
 def load_checkpoint(path):
