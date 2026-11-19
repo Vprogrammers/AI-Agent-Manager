@@ -1,4 +1,19 @@
 /** Local, deterministic prompt suggestions. No provider calls. */
+/** Conservative equivalence: only well-known instruction aliases, never remove user requirements. */
+export function semanticInstructionKey(line:string):string {
+ const normalized=line.toLowerCase().trim().replace(/[.!?]+$/,'').replace(/\s+/g,' ');
+ const aliases:[RegExp,string][]=[
+  [/^(?:run|execute) (?:the )?tests?$/,'run tests'],
+  [/^(?:test|verify) (?:the )?(?:changes|fix)$/,'verify changes'],
+  [/^(?:do not|don't|never) (?:change|modify) unrelated (?:files|code)$/,'preserve unrelated code'],
+  [/^(?:keep|preserve) unrelated (?:code|behavior|behaviour)$/,'preserve unrelated code']
+ ];
+ return aliases.find(([pattern])=>pattern.test(normalized))?.[1]||normalized;
+}
+export function dedupeGuidance(lines:string[]):string[] {
+ const seen=new Set<string>();
+ return lines.filter(line=>{const key=semanticInstructionKey(line);if(seen.has(key))return false;seen.add(key);return true;});
+}
 export type Agent = 'claude'|'codex'|'other';
 export type PromptMetrics = {originalEstimate:number; proposedEstimate:number; deltaEstimate:number};
 export function estimateTokens(text:string):number {return Math.ceil(text.length/4);}
@@ -66,7 +81,8 @@ export function analyzePrompt(text:string, files:string[]=[], instructions:strin
  if(strategy==='detailed') additions.push('Report changed files, checks executed, and unresolved risks.');
  if(missing.length&&strategy!=='concise') additions.push('Clarify blocking ambiguity instead of assuming: '+missing.join(' '));
  // Do not expand an already detailed request, or duplicate guidance already present.
- const unique=additions.filter(a=>!original.toLowerCase().includes(a.toLowerCase()));
+ const originalKeys=new Set(original.split(/[\n.!?]+/).map(semanticInstructionKey));
+ const unique=dedupeGuidance(additions).filter(a=>!originalKeys.has(semanticInstructionKey(a))&&!original.toLowerCase().includes(a.toLowerCase()));
  const budget=Math.max(0,maxExtraTokens)*4;
  const chosen:string[]=[];let remaining=budget;
  for(const item of unique){const line='- '+item+'\n';if(line.length<=remaining){chosen.push(line.trimEnd());remaining-=line.length;}}
@@ -78,4 +94,15 @@ export const emptyFeedback=():Feedback=>({approved:0,edited:0,regenerated:0,reje
 export function recommendedStrategy(stats:Feedback):Strategy {
  const entries=(Object.keys(stats.strategy) as Strategy[]).sort((a,b)=>stats.strategy[b]-stats.strategy[a]);
  return stats.strategy[entries[0]]>0?entries[0]:'balanced';
+}
+
+export type ExecutionEvidence = {testsPassed?:number;testsFailed?:number;completed?:boolean;durationSeconds?:number;reportedInputTokens?:number};
+export function compareExecutionEvidence(original:ExecutionEvidence,optimized:ExecutionEvidence):{verdict:'better'|'worse'|'inconclusive';reason:string} {
+ if(original.testsFailed===undefined||optimized.testsFailed===undefined||original.testsPassed===undefined||optimized.testsPassed===undefined)
+  return {verdict:'inconclusive',reason:'Both runs need comparable test results.'};
+ if(original.testsPassed+original.testsFailed!==optimized.testsPassed+optimized.testsFailed)
+  return {verdict:'inconclusive',reason:'Test coverage differs between runs.'};
+ if(optimized.testsFailed<original.testsFailed)return {verdict:'better',reason:'Fewer failing tests with equal test counts.'};
+ if(optimized.testsFailed>original.testsFailed)return {verdict:'worse',reason:'More failing tests with equal test counts.'};
+ return {verdict:'inconclusive',reason:'Equal test results; token and duration metrics alone do not prove quality.'};
 }
