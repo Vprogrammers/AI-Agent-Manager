@@ -227,6 +227,16 @@ fn login_pty_write(input: String, state: tauri::State<'_, LoginSession>) -> Resu
 }
 
 #[tauri::command]
+fn cancel_provider_login(state: tauri::State<'_, LoginSession>) -> Result<(), String> {
+    use std::io::Write;
+    let mut guard = state.0.lock().map_err(|_| "Login session unavailable")?;
+    let writer = guard.as_mut().ok_or("No active login session")?;
+    // Ctrl-C is delivered to the foreground process via the PTY.
+    writer.write_all(&[3]).map_err(|_| "Unable to interrupt login")?;
+    writer.flush().map_err(|_| "Unable to interrupt login".to_string())
+}
+
+#[tauri::command]
 fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::State<'_, LoginSession>) -> Result<String, String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     let (binary, args): (&str, &[&str]) = match provider.as_str() {
@@ -246,6 +256,9 @@ fn open_provider_login(provider: String, app: tauri::AppHandle, state: tauri::St
             candidates
         }).find(|p| p.is_file())
     }).ok_or("Provider CLI not found. Recheck installation first.")?;
+    if state.0.lock().map_err(|_| "Login session unavailable")?.is_some() {
+        return Err("A login is already in progress. Cancel the previous login first.".into());
+    }
     let pty = native_pty_system().openpty(PtySize {
         rows: 24, cols: 100, pixel_width: 0, pixel_height: 0
     }).map_err(|_| "Could not create interactive login terminal".to_string())?;
@@ -1009,6 +1022,6 @@ fn architect_apply(root: String, proposals: Vec<project_architect::Proposal>) ->
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
