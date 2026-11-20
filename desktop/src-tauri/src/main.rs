@@ -985,7 +985,22 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
     let mut child = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
-    if provider == "claude" { child.env("AAM_DESKTOP_STREAM", "1"); }
+    if provider == "claude" {
+        child.env("AAM_DESKTOP_STREAM", "1");
+        // Claude's interactive claude.ai login can be overridden by stale API
+        // credentials inherited from a desktop launcher. Match the working CLI
+        // login when the official auth status explicitly identifies claude.ai.
+        let claude_ai_login = Command::new("claude").args(["auth", "status"])
+            .output().ok().filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .map(|status| status.get("loggedIn").and_then(|v| v.as_bool()) == Some(true)
+                && status.get("authMethod").and_then(|v| v.as_str()) == Some("claude.ai"))
+            .unwrap_or(false);
+        if claude_ai_login {
+            child.env_remove("ANTHROPIC_API_KEY");
+            child.env_remove("ANTHROPIC_AUTH_TOKEN");
+        }
+    }
     // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
     if permission != "full-access" { child.env("AAM_OUTER_SANDBOX", "1"); } else { child.env_remove("AAM_OUTER_SANDBOX"); }
     child.stdout(std::process::Stdio::piped())
