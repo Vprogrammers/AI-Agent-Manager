@@ -46,6 +46,24 @@ mod tests {
         assert!(registry.decide("approval", "run", true).is_err());
     }
     #[tokio::test]
+    async fn denial_is_delivered_and_cannot_be_replayed() {
+        let registry = ApprovalRegistry::default();
+        let rx = registry.register("deny-1".into(), "run-1".into()).unwrap();
+        registry.decide("deny-1", "run-1", false).unwrap();
+        assert_eq!(rx.await.unwrap(), false);
+        assert!(registry.decide("deny-1", "run-1", true).is_err());
+    }
+    #[tokio::test]
+    async fn independent_requests_are_isolated() {
+        let registry = ApprovalRegistry::default();
+        let a = registry.register("a".into(), "run-a".into()).unwrap();
+        let b = registry.register("b".into(), "run-b".into()).unwrap();
+        registry.cancel_request("run-a");
+        assert!(a.await.is_err());
+        registry.decide("b", "run-b", true).unwrap();
+        assert_eq!(b.await.unwrap(), true);
+    }
+    #[tokio::test]
     async fn cancellation_denies_pending_approval() {
         let registry = ApprovalRegistry::default();
         let rx = registry.register("approval".into(), "run".into()).unwrap();
