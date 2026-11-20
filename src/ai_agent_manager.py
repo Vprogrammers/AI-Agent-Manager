@@ -2,6 +2,8 @@
 """Project-independent Claude Code / Codex bridge with bounded Git handoff."""
 import argparse
 import signal
+import shlex
+import socket
 import time
 import threading
 import json
@@ -52,6 +54,52 @@ def save(path, state):
     finally:
         tmp.unlink(missing_ok=True)
 
+def permission_hook():
+    """Claude's documented PermissionRequest command-hook protocol.
+
+    Send the original tool request to the per-run authenticated desktop socket.
+    Connection errors, malformed replies and timeouts ALWAYS deny.
+    """
+    allowed = False
+    data = {}
+    try:
+        raw = sys.stdin.buffer.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("Permission request exceeds 64 KiB")
+        data = json.loads(raw)
+        address = os.environ["AAM_APPROVAL_SOCKET"]
+        token = os.environ["AAM_APPROVAL_TOKEN"]
+        payload = json.dumps({
+            "token": token,
+            "tool": data.get("tool_name", "unknown"),
+            "input": data.get("tool_input", {}),
+        }, ensure_ascii=False).encode("utf-8") + b"\\n"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(121)
+            connection.connect(address)
+            connection.sendall(payload)
+            response = connection.recv(4096)
+        allowed = json.loads(response).get("allow") is True
+    except (OSError, ValueError, KeyError, TimeoutError, TypeError):
+        pass
+    output = {"hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "permissionDecision": "allow" if allowed else "deny",
+    }}
+    if allowed:
+        output["hookSpecificOutput"]["updatedInput"] = data.get("tool_input", {})
+    else:
+        output["hookSpecificOutput"]["permissionDecisionReason"] = "Denied or approval host unavailable"
+    print(json.dumps(output), flush=True)
+    return 0
+
+
+def permission_hook_command():
+    if getattr(sys, "frozen", False):
+        return shlex.quote(sys.executable) + " --approval-hook"
+    return shlex.quote(sys.executable) + " " + shlex.quote(str(Path(__file__).resolve())) + " --approval-hook"
+
+
 def build_command(tool, model, session_id, prompt):
     permission = os.environ.get('AAM_PERMISSION_MODE', 'default')
     if permission not in ('default', 'read-only', 'workspace-write', 'full-access'):
@@ -66,6 +114,13 @@ def build_command(tool, model, session_id, prompt):
             cmd += ['--dangerously-skip-permissions']
         elif permission == 'read-only':
             cmd += ['--allowedTools', 'Read,Glob,Grep']
+        if os.environ.get('AAM_APPROVAL_SOCKET') and os.environ.get('AAM_APPROVAL_TOKEN'):
+            # Session-local settings: do not edit the user's Claude configuration.
+            settings = {"hooks": {"PermissionRequest": [{
+                "matcher": "",
+                "hooks": [{"type": "command", "command": permission_hook_command(), "timeout": 125}],
+            }]}}
+            cmd += ['--settings', json.dumps(settings, ensure_ascii=False)]
         if session_id:
             cmd += ['--resume', session_id]
         if model:
@@ -676,4 +731,6 @@ def main():
     return 0
 
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--approval-hook':
+        sys.exit(permission_hook())
     sys.exit(main())
