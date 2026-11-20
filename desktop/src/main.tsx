@@ -8,6 +8,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
+import InteractiveTerminal from './InteractiveTerminal';
 import { validateAttachment, type PromptAttachment } from './promptAttachments';
 import { analyzePrompt, recommendedStrategy, emptyFeedback, promptDiff, validateSuggestion, estimateTokens, type Agent, type Strategy, type Feedback } from './promptOptimizer';
 
@@ -272,50 +273,27 @@ function App() {
   const [busy, setBusy] = React.useState(false);
   const [approval, setApproval] = React.useState<{id:string;requestId:string;provider:string;description:string;command?:string}|null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = React.useState(false);
-  // Interactive CLI is a real PTY, not a synthetic Approve/Deny dialog.
-  // Provider-owned permission questions remain in the same CLI process.
   const [terminalSession, setTerminalSession] = React.useState<string | null>(null);
-  const [terminalText, setTerminalText] = React.useState('');
-  const [terminalInput, setTerminalInput] = React.useState('');
   const [terminalBusy, setTerminalBusy] = React.useState(false);
-  const [terminalProvider, setTerminalProvider] = React.useState('');
-  React.useEffect(() => {
-    let active = true;
-    const unlisten = listen<{requestId:string;text:string;finished:boolean}>('interactive-cli-output', event => {
-      if (!active || event.payload.requestId !== terminalSession) return;
-      if (event.payload.text) setTerminalText(previous => (previous + event.payload.text).slice(-150000));
-      if (event.payload.finished) setTerminalBusy(false);
-    });
-    return () => { active = false; void unlisten.then(stop => stop()); };
-  }, [terminalSession]);
-  const startTerminal = async () => {
-    if (!root || terminalBusy || busy) return;
+  const [terminalProvider, setTerminalProvider] = React.useState<Provider>('claude');
+  const [terminalPrompt, setTerminalPrompt] = React.useState('');
+  const [terminalRoot, setTerminalRoot] = React.useState('');
+  const [terminalPermission, setTerminalPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
+  const startTerminal = (initialPrompt = '') => {
+    if (!root.trim() || terminalBusy || busy) return;
     if (provider === 'auto' || provider === 'balanced') {
-      setError('Choose a specific provider for its interactive CLI.');
+      setError('Choose a specific agent for its native interactive session.');
       return;
     }
-    if (permission !== 'full-access') {
-      setError('Interactive CLI currently requires explicit Full access. It cannot enforce workspace sandbox permissions.');
-      return;
-    }
-    const requestId = crypto.randomUUID();
-    setTerminalSession(requestId);
+    if (permission === 'full-access' && !window.confirm('Full access removes the OS sandbox. The provider may run tools without further approval. Continue?')) return;
     setTerminalProvider(provider);
-    setTerminalText('');
+    setTerminalRoot(root);
+    setTerminalPermission(permission);
+    setTerminalPrompt(initialPrompt);
+    setTerminalSession(crypto.randomUUID());
     setTerminalBusy(true);
-    try {
-      await invoke('start_interactive_cli',{requestId,provider,root,permission});
-    } catch (e) {
-      setTerminalBusy(false);
-      setError(String(e));
-    }
+    setError('');
   };
-  const sendTerminal = async (input: string) => {
-    if (!terminalSession || !terminalBusy) return;
-    try { await invoke('interactive_cli_input',{requestId:terminalSession,input}); }
-    catch(e){setError(String(e));}
-  };
-
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
   React.useEffect(() => { if (startedAt === null) return; const id = window.setInterval(() => setElapsed(Math.floor((Date.now()-startedAt)/1000)), 1000); return () => window.clearInterval(id); }, [startedAt]);
@@ -448,7 +426,7 @@ function App() {
   };
   const submitPrompt = () => {
     const original=prompt.trim();
-    if((!original && !attachments.length)||busy||!root.trim())return;
+    if((!original && !attachments.length)||busy||terminalBusy||!root.trim())return;
     if(original==='/clear'||original==='/new'){void clearSession();return;}
     const chosen=recommendedStrategy(feedback);
     setStrategy(chosen);setPendingPrompt(original);
@@ -465,6 +443,12 @@ function App() {
     const text = originalText + attachmentContext;
     if (text === '/clear' || text === '/new') { await clearSession(); return; }
     if (!originalText && !attachments.length || !root.trim() || busy) return;
+    if (provider !== 'auto' && provider !== 'balanced') {
+      if (terminalBusy) { setError('The interactive CLI is already running. Continue in its terminal.'); return; }
+      startTerminal(text);
+      setPendingPrompt(null); setSuggestedPrompt(''); setPrompt(''); setAttachments([]);
+      return;
+    }
     const id = String(++requestSeq.current);
     const requestedProvider = provider;
     const requestRoot = root;
@@ -678,25 +662,16 @@ function App() {
       </>}
     </div></aside>
     <main>
-    <section aria-label="Native interactive agent terminal" style={{margin:'12px 16px',padding:12,border:'1px solid #54677a',borderRadius:8}}>
-      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-        <strong>Native CLI · interactive permissions</strong>
-        <button type="button" disabled={busy||terminalBusy||!root||provider==='auto'||provider==='balanced'||permission!=='full-access'} onClick={()=>void startTerminal()}>Open {provider} CLI</button>
-        {terminalBusy&&<button type="button" onClick={()=>void invoke('interrupt_interactive_cli',{requestId:terminalSession}).catch(e=>setError(String(e)))}>Interrupt (Ctrl+C)</button>}
+    <section aria-label="Native CLI" style={{margin:'12px 16px',border:'1px solid #54677a',borderRadius:8}}>
+      <div style={{padding:12,display:'flex',alignItems:'center',gap:10}}>
+        <strong>Interactive CLI</strong>
+        <button type="button" disabled={busy||terminalBusy||!root||provider==='auto'||provider==='balanced'} onClick={()=>startTerminal()}>Open {provider} terminal</button>
+        <small>Provider-native approval menus; approved permission level from left panel applies to this session.</small>
       </div>
-      <p className="hint">Runs the original CLI with its own approval prompts and session. Select a specific agent and Full access explicitly. This terminal is not OS-sandboxed; review every command before approving. The standard prompt runner remains separate.</p>
-      {terminalSession&&<>
-        <p className="hint">{terminalProvider} · {terminalBusy?'Running':'Exited'}</p>
-        <pre aria-label="Interactive CLI output" role="log" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:350,overflowY:'auto',background:'#101820',padding:12,borderRadius:6}}>{terminalText.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'').replace(/\x1b\][^\x07]*(?:\x07|\x1b\)/g,'')}</pre>
-        <form onSubmit={e=>{e.preventDefault();void sendTerminal(terminalInput+'\r');setTerminalInput('');}} style={{display:'flex',gap:8}}>
-          <input aria-label="Interactive CLI input" placeholder="Type response to the CLI prompt" value={terminalInput} disabled={!terminalBusy} onChange={e=>setTerminalInput(e.target.value)} onKeyDown={e=>{
-            if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){
-              e.preventDefault();void sendTerminal(({ArrowUp:'\x1b[A',ArrowDown:'\x1b[B',ArrowLeft:'\x1b[D',ArrowRight:'\x1b[C'} as Record<string,string>)[e.key]);
-            }
-          }}/>
-          <button type="submit" disabled={!terminalBusy}>Send</button>
-        </form>
-      </>}
+      {terminalSession&&<InteractiveTerminal key={terminalSession} requestId={terminalSession}
+        provider={terminalProvider} root={terminalRoot} permission={terminalPermission}
+        initialPrompt={terminalPrompt} onFinish={()=>setTerminalBusy(false)}
+        onError={setError}/>}
     </section>
     {approval&&<section role="alertdialog" aria-modal="true" aria-labelledby="agent-approval-title" style={{padding:20,border:'2px solid #d9a441',margin:16,borderRadius:8,background:'#1b222b'}}>
       <h3 id="agent-approval-title">Agent permission required · {approval.provider}</h3>
