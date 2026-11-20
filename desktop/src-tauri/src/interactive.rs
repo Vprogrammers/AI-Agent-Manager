@@ -1,14 +1,16 @@
-//! Native interactive CLI transport. The original provider CLI owns its prompts,
-//! tool approvals and session state; the desktop only relays terminal I/O.
-//! This mode is explicitly full-access, never a substitute for a sandbox.
+//! Provider-native interactive sessions. PTY delivers original CLI permission prompts
+//! without guessing approval semantics from human-readable terminal output.
 use std::{collections::HashMap, io::{Read, Write}, path::Path, sync::Mutex};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-type Writer = Box<dyn Write + Send>;
+struct Session {
+    writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
+}
 #[derive(Default)]
-pub struct InteractiveSessions(Mutex<HashMap<String, Writer>>);
+pub struct InteractiveSessions(Mutex<HashMap<String, Session>>);
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +18,63 @@ struct TerminalEvent {
     request_id: String,
     text: String,
     finished: bool,
+}
+
+fn provider_binary(provider: &str) -> Result<&'static str, String> {
+    match provider {
+        "claude" => Ok("claude"),
+        "codex" => Ok("codex"),
+        "opencode" => Ok("opencode"),
+        "copilot" => Ok("copilot"),
+        "antigravity" => Ok("agy"),
+        _ => Err("Unknown provider".into()),
+    }
+}
+
+fn provider_command(
+    executable: &Path,
+    workspace: &Path,
+    provider: &str,
+    permission: &str,
+) -> Result<CommandBuilder, String> {
+    if permission == "full-access" {
+        return Ok(CommandBuilder::new(executable));
+    }
+    if !super::external_sandbox_ready(permission) {
+        return Err("OS sandbox unavailable; refusing an unsandboxed CLI".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = CommandBuilder::new("bwrap");
+        for arg in ["--die-with-parent", "--unshare-pid", "--new-session",
+            "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev",
+            "--proc", "/proc", "--tmpfs", "/tmp"] {
+            command.arg(arg);
+        }
+        if permission == "workspace-write" {
+            command.arg("--bind");
+            command.arg(workspace);
+            command.arg(workspace);
+        }
+        command.arg("--chdir");
+        command.arg(workspace);
+        command.arg("--");
+        command.arg(executable);
+        Ok(command)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = CommandBuilder::new("sandbox-exec");
+        command.arg("-p");
+        command.arg(super::macos_sandbox_profile(workspace, permission, provider)?);
+        command.arg(executable);
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (executable, workspace, provider);
+        Err("Interactive sandbox unavailable on this OS".into())
+    }
 }
 
 #[tauri::command]
@@ -27,46 +86,38 @@ pub fn start_interactive_cli(
     root: String,
     permission: String,
 ) -> Result<(), String> {
-    if request_id.len() > 128 || request_id.is_empty() || !request_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if request_id.is_empty() || request_id.len() > 128 ||
+        !request_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err("Invalid request ID".into());
     }
-    // Never silently elevate a read-only/workspace-write request to full access.
-    if permission != "full-access" {
-        return Err("Native interactive CLI requires explicit Full access. Other modes remain sandboxed.".into());
+    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) {
+        return Err("Unknown permission mode".into());
     }
-    let binary = match provider.as_str() {
-        "claude" => "claude",
-        "codex" => "codex",
-        "opencode" => "opencode",
-        "copilot" => "copilot",
-        "antigravity" => "agy",
-        _ => return Err("Unknown provider".into()),
-    };
+    let executable = super::find_cli(provider_binary(&provider)?)
+        .ok_or("Provider CLI not found in PATH")?;
     let workspace = Path::new(&root).canonicalize().map_err(|e| e.to_string())?;
     if !workspace.is_dir() || !workspace.join(".git").exists() {
         return Err("A Git workspace is required".into());
     }
-    let executable = super::find_cli(binary).ok_or("CLI not found in PATH")?;
-    let mut sessions_guard = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
-    if sessions_guard.contains_key(&request_id) {
-        return Err("Terminal already running".into());
-    }
+    let mut guard = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
+    if guard.contains_key(&request_id) { return Err("Request already running".into()); }
     let pty = native_pty_system().openpty(PtySize {
-        rows: 30, cols: 110, pixel_width: 0, pixel_height: 0
-    }).map_err(|e| format!("PTY: {e}"))?;
-    let mut cmd = CommandBuilder::new(executable);
-    cmd.cwd(workspace);
-    // Use the real interactive CLI: no -p/--print, no --no-ask-user,
-    // no bypassPermissions, no fabricated tool approvals.
-    let mut child = pty.slave.spawn_command(cmd).map_err(|e| format!("CLI launch: {e}"))?;
+        rows: 30, cols: 110, pixel_width: 0, pixel_height: 0,
+    }).map_err(|e| format!("PTY unavailable: {e}"))?;
+    let mut cmd = provider_command(&executable, &workspace, &provider, &permission)?;
+    cmd.cwd(&workspace);
+    // Do not inject bypass flags or non-interactive -p flags: the CLI owns its
+    // permission prompts, and this process remains alive while the user decides.
+    let mut child = pty.slave.spawn_command(cmd)
+        .map_err(|e| format!("CLI failed to start: {e}"))?;
     drop(pty.slave);
     let writer = pty.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pty.master.try_clone_reader().map_err(|e| e.to_string())?;
-    sessions_guard.insert(request_id.clone(), writer);
-    drop(sessions_guard);
-    let handle = app.clone();
+    guard.insert(request_id.clone(), Session { writer, master: pty.master });
+    drop(guard);
+    let app_clone = app.clone();
     std::thread::spawn(move || {
-        let mut buffer = [0u8; 2048];
+        let mut buffer = [0u8; 4096];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
@@ -80,11 +131,11 @@ pub fn start_interactive_cli(
             }
         }
         let _ = child.wait();
-        if let Some(state) = handle.try_state::<InteractiveSessions>() {
-            if let Ok(mut guard) = state.0.lock() { guard.remove(&request_id); }
+        if let Some(state) = app_clone.try_state::<InteractiveSessions>() {
+            if let Ok(mut entries) = state.0.lock() { entries.remove(&request_id); }
         }
         let _ = app.emit("interactive-cli-output", TerminalEvent {
-            request_id, text: String::new(), finished: true
+            request_id, text: String::new(), finished: true,
         });
     });
     Ok(())
@@ -96,11 +147,28 @@ pub fn interactive_cli_input(
     request_id: String,
     input: String,
 ) -> Result<(), String> {
-    if input.len() > 8192 { return Err("Terminal input exceeds 8 KiB".into()); }
-    let mut guard = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
-    let writer = guard.get_mut(&request_id).ok_or("Terminal session not running")?;
-    writer.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+    if input.len() > 32768 { return Err("Terminal input exceeds 32 KiB".into()); }
+    let mut entries = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
+    let session = entries.get_mut(&request_id).ok_or("Terminal is not running")?;
+    session.writer.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+    session.writer.flush().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn resize_interactive_cli(
+    sessions: tauri::State<'_, InteractiveSessions>,
+    request_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    if !(5..=200).contains(&rows) || !(20..=400).contains(&cols) {
+        return Err("Unsupported terminal dimensions".into());
+    }
+    let entries = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
+    let session = entries.get(&request_id).ok_or("Terminal is not running")?;
+    session.master.resize(PtySize {
+        rows, cols, pixel_width: 0, pixel_height: 0,
+    }).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -108,8 +176,22 @@ pub fn interrupt_interactive_cli(
     sessions: tauri::State<'_, InteractiveSessions>,
     request_id: String,
 ) -> Result<(), String> {
-    let mut guard = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
-    let writer = guard.get_mut(&request_id).ok_or("Terminal session not running")?;
-    writer.write_all(&[3]).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+    let mut entries = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
+    let session = entries.get_mut(&request_id).ok_or("Terminal is not running")?;
+    session.writer.write_all(&[3]).map_err(|e| e.to_string())?;
+    session.writer.flush().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_known_cli_providers_are_allowed() {
+        for name in ["claude", "codex", "opencode", "copilot", "antigravity"] {
+            assert!(provider_binary(name).is_ok());
+        }
+        assert!(provider_binary("sh").is_err());
+        assert!(provider_binary("claude; echo unsafe").is_err());
+    }
 }
