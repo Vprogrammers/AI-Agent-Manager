@@ -3,6 +3,7 @@ use std::{path::{Path, PathBuf}, process::Command, sync::{Arc,Mutex}};
 use std::collections::HashMap;
 use tauri::Manager;
 mod project_architect;
+mod approval;
 
 fn configure_agent_path() {
     // Finder/Dock launches often lack the user's interactive shell PATH.
@@ -407,11 +408,17 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
 }
 
 #[tauri::command]
-fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -> Result<(), String> {
+fn cancel_prompt(state: tauri::State<'_, RunningRequests>, approvals: tauri::State<'_, approval::ApprovalRegistry>, request_id: String) -> Result<(), String> {
     let requests = state.0.lock().map_err(|_|"Request state unavailable")?;
     let signal = requests.get(&request_id).ok_or("Request is no longer running")?;
+    approvals.cancel_request(&request_id);
     signal.notify_one();
     Ok(())
+}
+
+#[tauri::command]
+fn decide_agent_approval(approvals: tauri::State<'_, approval::ApprovalRegistry>, approval_id: String, request_id: String, allow: bool) -> Result<(), String> {
+    approvals.decide(&approval_id, &request_id, allow)
 }
 
 // Only Linux bubblewrap is supported for third-party CLI execution.
@@ -1467,6 +1474,6 @@ fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![stage_prompt_attachment, relevant_prompt_files, clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).manage(approval::ApprovalRegistry::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![stage_prompt_attachment, relevant_prompt_files, clear_agent_session, decide_agent_approval, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
