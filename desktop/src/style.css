@@ -133,3 +133,32 @@ footer.composer>.send-button{flex-shrink:0}
 .markdown-answer th,.markdown-answer td{border:1px solid #475362;padding:7px 10px;text-align:left;white-space:normal}
 .markdown-answer th{background:#293744}
 .markdown-answer hr{border:0;border-top:1px solid #475362;margin:1.2em 0}
+
+/* Prompt attachments */
+.prompt-attachments { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:8px 0; }
+.prompt-attachments > button { padding:7px 12px; }
+.attachment-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border:1px solid #465668; border-radius:8px; background:#25303b; font-size:12px; max-width:250px; overflow-wrap:anywhere; }
+.attachment-chip button { padding:0 4px; min-width:20px; background:transparent; border:0; color:inherit; cursor:pointer; }
+
+/* Interactive terminal shares the chat column; it never pushes the composer offscreen. */
+.app > main { min-height:0; height:100%; overflow:hidden; }
+.native-terminal-panel {
+  flex:0 0 auto;
+  min-width:0;
+  max-height:45dvh;
+  overflow-y:auto;
+  margin:8px 16px;
+  border:1px solid #54677a;
+  border-radius:8px;
+}
+.native-terminal-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:8px 12px; }
+.native-terminal-toolbar strong { font-size:13px; }
+.native-terminal-controls { display:flex; gap:8px; margin-left:auto; }
+.native-terminal-controls button { padding:6px 10px; font-size:12px; }
+.native-terminal-panel .xterm { width:100%; }
+.app > main > .messages { min-height:0; }
+.app > main > footer.composer { flex:0 0 auto; position:relative; z-index:1; background:#171c23; }
+@media (max-height:650px) {
+  .native-terminal-panel { max-height:32dvh; }
+  .native-terminal-toolbar { padding:4px 8px; }
+}

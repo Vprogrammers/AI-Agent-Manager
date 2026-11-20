@@ -3,6 +3,12 @@ use std::{path::{Path, PathBuf}, process::Command, sync::{Arc,Mutex}};
 use std::collections::HashMap;
 use tauri::Manager;
 mod project_architect;
+mod approval;
+mod codex_app_server;
+mod acp_adapter;
+#[cfg(unix)]
+mod hook_approval;
+mod interactive;
 
 fn configure_agent_path() {
     // Finder/Dock launches often lack the user's interactive shell PATH.
@@ -407,11 +413,17 @@ async fn provider_setup_status() -> Vec<ProviderSetup> {
 }
 
 #[tauri::command]
-fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -> Result<(), String> {
+fn cancel_prompt(state: tauri::State<'_, RunningRequests>, approvals: tauri::State<'_, approval::ApprovalRegistry>, request_id: String) -> Result<(), String> {
     let requests = state.0.lock().map_err(|_|"Request state unavailable")?;
     let signal = requests.get(&request_id).ok_or("Request is no longer running")?;
+    approvals.cancel_request(&request_id);
     signal.notify_one();
     Ok(())
+}
+
+#[tauri::command]
+fn decide_agent_approval(approvals: tauri::State<'_, approval::ApprovalRegistry>, approval_id: String, request_id: String, allow: bool) -> Result<(), String> {
+    approvals.decide(&approval_id, &request_id, allow)
 }
 
 // Only Linux bubblewrap is supported for third-party CLI execution.
@@ -419,7 +431,7 @@ fn cancel_prompt(state: tauri::State<'_, RunningRequests>, request_id: String) -
 // Single execution contract for all five providers. The legacy AAM engine
 // remains the transport for Claude/Codex until its event protocol is migrated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExecutionAdapter { Engine, SandboxedCli }
+enum ExecutionAdapter { Engine, CodexAppServer, Acp, SandboxedCli }
 
 #[derive(Clone, Copy, Debug)]
 struct ProviderAdapter {
@@ -429,10 +441,10 @@ struct ProviderAdapter {
 
 const PROVIDER_ADAPTERS: [ProviderAdapter; 5] = [
     ProviderAdapter { id: "claude", transport: ExecutionAdapter::Engine },
-    ProviderAdapter { id: "codex", transport: ExecutionAdapter::Engine },
-    ProviderAdapter { id: "antigravity", transport: ExecutionAdapter::SandboxedCli },
-    ProviderAdapter { id: "opencode", transport: ExecutionAdapter::SandboxedCli },
-    ProviderAdapter { id: "copilot", transport: ExecutionAdapter::SandboxedCli },
+    ProviderAdapter { id: "codex", transport: ExecutionAdapter::CodexAppServer },
+    ProviderAdapter { id: "antigravity", transport: ExecutionAdapter::Acp },
+    ProviderAdapter { id: "opencode", transport: ExecutionAdapter::Acp },
+    ProviderAdapter { id: "copilot", transport: ExecutionAdapter::Acp },
 ];
 
 fn provider_adapter(id: &str) -> Option<ProviderAdapter> {
@@ -451,6 +463,7 @@ fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), 
         ExecutionAdapter::Engine => {
             aam_executable().map(|_| ()).map_err(|_| "AAM engine unavailable".into())
         },
+        ExecutionAdapter::CodexAppServer | ExecutionAdapter::Acp => Ok(()),
         ExecutionAdapter::SandboxedCli => external_provider_preflight(adapter.id, permission),
     }
 }
@@ -469,9 +482,9 @@ mod adapter_contract_tests {
     #[test]
     fn engine_and_sandbox_transports_are_explicit() {
         assert_eq!(provider_adapter("claude").unwrap().transport, ExecutionAdapter::Engine);
-        assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::Engine);
+        assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::CodexAppServer);
         for id in ["antigravity", "opencode", "copilot"] {
-            assert_eq!(provider_adapter(id).unwrap().transport, ExecutionAdapter::SandboxedCli);
+            assert_eq!(provider_adapter(id).unwrap().transport, ExecutionAdapter::Acp);
         }
         assert!(provider_adapter("unknown").is_none());
     }
@@ -772,33 +785,42 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     result
 }
 
-// Deterministic routing: task fit first, availability second. No paid model calls.
+// Deterministic routing: explicit choice, primary intent, then availability.
+// Verification words alone must not override an implementation or architecture task.
 fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static str> {
     let p = prompt.to_lowercase();
-    let contains_any = |terms: &[&str]| terms.iter().any(|term| p.contains(term));
-    let ordered: Vec<&str> = if contains_any(&["antigravity", "gemini", "agy"]) {
-        vec!["antigravity", "claude", "codex", "opencode", "copilot"]
-    } else if contains_any(&["review", "audit", "security", "bug", "test", "debug", "grešk", "gresk", "testir", "provjer", "prover"]) {
-        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
-    } else if contains_any(&["architecture", "design", "refactor", "plan", "arhitektur", "dizajn", "planir"]) {
-        vec!["claude", "antigravity", "codex", "opencode", "copilot"]
-    } else if contains_any(&["github", "pull request", "issue"]) {
+    let has = |terms: &[&str]| terms.iter().any(|term| p.contains(term));
+    let providers = ["claude", "codex", "antigravity", "opencode", "copilot"];
+    let explicit = providers.iter().copied().find(|id| {
+        let markers = [
+            format!("use {id}"), format!("koristi {id}"),
+            format!("with {id}"), format!("sa {id}"),
+            format!("via {id}"), format!("@{id}"),
+        ];
+        markers.iter().any(|marker| p.contains(marker))
+    });
+    let ordered: Vec<&str> = if let Some(id) = explicit {
+        std::iter::once(id).chain(providers.iter().copied().filter(|candidate| *candidate != id)).collect()
+    } else if mode == "balanced" {
+        vec!["claude", "codex", "antigravity", "opencode", "copilot"]
+    } else if has(&["github", "pull request", "create issue", "otvori issue"]) {
         vec!["copilot", "codex", "claude", "antigravity", "opencode"]
-    } else if contains_any(&["explain", "document", "summar", "objasn", "dokument", "saž", "saz", "analizir", "analiz", "prijedlog", "predlog"]) {
+    } else if has(&["implement", "implementir", "popravi", "ispravi", "fix ", "izmeni", "izmijeni", "promeni", "promijeni", "dodaj", "napravi", "uradi", "sredi", "code change"]) {
+        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
+    } else if has(&["architecture", "arhitektur", "design", "dizajn", "refactor", "planir", "roadmap"]) {
+        vec!["claude", "codex", "antigravity", "opencode", "copilot"]
+    } else if has(&["security", "audit", "debug", "bug", "test failure", "failing test", "regression", "grešk", "gresk"]) {
+        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
+    } else if has(&["explain", "document", "summar", "objasn", "dokument", "saž", "saz", "analizir", "analiz", "prijedlog", "predlog"]) {
         vec!["antigravity", "claude", "codex", "opencode", "copilot"]
     } else {
-        vec!["codex", "antigravity", "claude", "opencode", "copilot"]
+        vec!["claude", "codex", "antigravity", "opencode", "copilot"]
     };
-    let mut candidates: Vec<&str> = ordered.into_iter().filter(|id|
+    // Keep task-fit ordering in auto mode. Explicit provider selection always wins.
+    // Balanced intentionally retains its stable default order.
+    ordered.into_iter().filter(|id|
         permission == "workspace-write" || ["claude", "codex"].contains(id)
-    ).collect();
-    if mode == "balanced" {
-        // Balanced prefers general-purpose agents, while respecting task constraints.
-        candidates.sort_by_key(|id| match *id {
-            "claude" => 0, "codex" => 1, "antigravity" => 2, "opencode" => 3, _ => 4
-        });
-    }
-    candidates
+    ).collect()
 }
 
 #[cfg(test)]
@@ -857,6 +879,19 @@ mod routing_tests {
         assert!(provider_available("codex", &cooldowns));
     }
 
+    #[test]
+    fn routing_prioritizes_primary_intent_over_generic_verification() {
+        let prompt = "Procitaj handoff, proveri Git stanje, popravi valutu u formi i testiraj.";
+        assert_eq!(route_candidates(prompt, "auto", "workspace-write")[0], "codex");
+        assert_eq!(route_candidates("Proveri Git stanje i nastavi plan arhitekture", "auto", "workspace-write")[0], "claude");
+        assert_eq!(route_candidates("Proveri Git stanje", "auto", "workspace-write")[0], "claude");
+    }
+    #[test]
+    fn routing_respects_explicit_provider_and_balanced() {
+        assert_eq!(route_candidates("Koristi Codex za arhitekturu", "auto", "workspace-write")[0], "codex");
+        assert_eq!(route_candidates("Use Antigravity to debug", "balanced", "workspace-write")[0], "antigravity");
+        assert_eq!(route_candidates("Implement feature", "balanced", "workspace-write")[0], "claude");
+    }
     #[test]
     fn balanced_is_stable() {
         assert_eq!(route_candidates("Explain this", "balanced", "workspace-write")[0], "claude");
@@ -960,7 +995,31 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
     let mut child = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
-    if provider == "claude" { child.env("AAM_DESKTOP_STREAM", "1"); }
+    #[cfg(unix)]
+    let hook_gateway = if provider == "claude" && permission != "full-access" {
+        Some(hook_approval::HookGateway::start(app, request_id)?)
+    } else { None };
+    #[cfg(unix)]
+    if let Some(ref gateway) = hook_gateway {
+        child.env("AAM_APPROVAL_SOCKET", &gateway.path);
+        child.env("AAM_APPROVAL_TOKEN", &gateway.token);
+    }
+    if provider == "claude" {
+        child.env("AAM_DESKTOP_STREAM", "1");
+        // Claude's interactive claude.ai login can be overridden by stale API
+        // credentials inherited from a desktop launcher. Match the working CLI
+        // login when the official auth status explicitly identifies claude.ai.
+        let claude_ai_login = Command::new("claude").args(["auth", "status"])
+            .output().ok().filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+            .map(|status| status.get("loggedIn").and_then(|v| v.as_bool()) == Some(true)
+                && status.get("authMethod").and_then(|v| v.as_str()) == Some("claude.ai"))
+            .unwrap_or(false);
+        if claude_ai_login {
+            child.env_remove("ANTHROPIC_API_KEY");
+            child.env_remove("ANTHROPIC_AUTH_TOKEN");
+        }
+    }
     // Set only for the engine launched behind sandbox_command (Seatbelt/bwrap).
     if permission != "full-access" { child.env("AAM_OUTER_SANDBOX", "1"); } else { child.env_remove("AAM_OUTER_SANDBOX"); }
     child.stdout(std::process::Stdio::piped())
@@ -1015,6 +1074,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
+    app.state::<approval::ApprovalRegistry>().cancel_request(request_id);
     let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
     if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
         set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
@@ -1076,7 +1136,7 @@ fn workspace_fingerprint(root: &Path) -> Result<Vec<u8>, String> {
 
 // A provider handoff must account for edits made by the previous provider.
 fn continuation_prompt(original: &str) -> String {
-    format!("You are taking over an IN-PROGRESS task from another agent. Continue from the CURRENT workspace, not from scratch. Inspect git status, git diff (staged and unstaged), recent commits, and relevant files first. Preserve all existing edits, including uncommitted work. Determine what has already been completed; do not repeat completed edits or external side effects (publishing, deleting, payments, API writes). If an operation cannot be verified, ask for confirmation before repeating it. Keep the original project instructions and constraints. Original request:\n{original}")
+    format!("You are taking over an IN-PROGRESS task from another agent. Continue from the CURRENT workspace, not from scratch. Inspect git status and diff first (staged and unstaged), then recent commits and relevant files. Preserve all existing edits, including uncommitted work. Determine what has already been completed; do not repeat completed edits or external side effects (publishing, deleting, payments, API writes). If an operation cannot be verified, ask for confirmation before repeating it. Keep the original project instructions and constraints. Original request:\n{original}")
 }
 
 #[cfg(test)]
@@ -1139,21 +1199,28 @@ mod execution_fallback_tests {
     #[test]
     fn seatbelt_permissions_limit_workspace_writes() {
         use super::macos_sandbox_profile;
-        use std::path::Path;
-        let root = Path::new("/tmp/aam-test");
-        let read_only = macos_sandbox_profile(root, "read-only", "codex").unwrap();
-        let write = macos_sandbox_profile(root, "workspace-write", "codex").unwrap();
-        assert!(!read_only.contains(r#"(subpath "/tmp/aam-test")"#));
-        assert!(write.contains(r#"(subpath "/tmp/aam-test")"#));
-        assert!(macos_sandbox_profile(root, "full-access", "codex").is_err());
-        let opencode = macos_sandbox_profile(root, "workspace-write", "opencode").unwrap();
+        use std::process::Command;
+        // A Seatbelt profile resolves the actual Git metadata location.
+        // Test against a real repository, never a nonexistent hardcoded path.
+        let root = std::env::temp_dir().join(format!("aam-seatbelt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(&root).status().unwrap().success());
+        let read_only = macos_sandbox_profile(&root, "read-only", "codex").unwrap();
+        let write = macos_sandbox_profile(&root, "workspace-write", "codex").unwrap();
+        let workspace_grant = format!(r#"(subpath "{}")"#, root.display());
+        assert!(!read_only.contains(&workspace_grant));
+        assert!(write.contains(&workspace_grant));
+        assert!(macos_sandbox_profile(&root, "full-access", "codex").is_err());
+        let opencode = macos_sandbox_profile(&root, "workspace-write", "opencode").unwrap();
         assert!(opencode.contains(".local/share/opencode"));
         assert!(opencode.contains(".cache/opencode"));
         assert!(!write.contains(".local/share/opencode"));
-        let copilot = macos_sandbox_profile(root, "workspace-write", "copilot").unwrap();
+        let copilot = macos_sandbox_profile(&root, "workspace-write", "copilot").unwrap();
         assert!(copilot.contains(".copilot"));
         assert!(!write.contains(".copilot"));
         assert!(!opencode.contains(".copilot"));
+        std::fs::remove_dir_all(&root).unwrap();
 
     }
     #[test]
@@ -1176,6 +1243,10 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
     let result = match adapter.transport {
         ExecutionAdapter::Engine =>
             run_engine_adapter(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
+        ExecutionAdapter::CodexAppServer =>
+            codex_app_server::run(app, request_id, root, prompt, permission, stop.clone()).await,
+        ExecutionAdapter::Acp =>
+            acp_adapter::run(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
         ExecutionAdapter::SandboxedCli =>
             run_external_provider(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
     };
@@ -1183,6 +1254,44 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
         requests.remove(request_id);
     }
     result
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StagedAttachment { name: String, path: String, size: u64, kind: String }
+
+#[tauri::command]
+fn stage_prompt_attachment(root: String, source: String) -> Result<StagedAttachment, String> {
+    let workspace = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    if !workspace.is_dir() || !workspace.join(".git").exists() { return Err("Select a Git workspace first".into()); }
+    let source = Path::new(&source).canonicalize().map_err(|e| format!("Attachment: {e}"))?;
+    if !source.is_file() { return Err("Attachment must be a regular file".into()); }
+    let name = source.file_name().and_then(|v| v.to_str()).ok_or("Invalid attachment name")?.to_string();
+    let extension = source.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+    let kind = if ["png","jpg","jpeg","webp"].contains(&extension.as_str()) { "image" }
+        else if ["pdf","txt","md","json","yaml","yml","xml","csv","kt","kts","swift","ts","tsx","js","jsx","py","rs","java","go","html","css","sh","toml"].contains(&extension.as_str()) { "document" }
+        else { return Err("Unsupported attachment format".into()); };
+    let size = source.metadata().map_err(|e| e.to_string())?.len();
+    if size == 0 || size > 20 * 1024 * 1024 { return Err("Attachment must be between 1 byte and 20 MiB".into()); }
+    let folder = workspace.join(".git").join("ai-agent-manager").join("attachments");
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let unique = format!("{}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos(), name);
+    let target = folder.join(unique);
+    std::fs::copy(&source, &target).map_err(|e| format!("Cannot stage attachment: {e}"))?;
+    Ok(StagedAttachment { name, path: target.to_string_lossy().into_owned(), size, kind: kind.into() })
+}
+
+#[tauri::command]
+fn resolve_interactive_provider(prompt: String, mode: String, permission: String) -> Result<String, String> {
+    if !["auto", "balanced"].contains(&mode.as_str()) {
+        return Err("Only automatic routing needs provider resolution".into());
+    }
+    if !["read-only", "workspace-write", "full-access"].contains(&permission.as_str()) {
+        return Err("Invalid permission scope".into());
+    }
+    route_candidates(&prompt, &mode, &permission).into_iter()
+        .find(|id| cli_on_path(if *id == "antigravity" { "agy" } else { id }))
+        .map(str::to_owned).ok_or_else(|| "No supported agent executable found in PATH".into())
 }
 
 #[tauri::command]
@@ -1402,6 +1511,6 @@ fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![relevant_prompt_files, clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).manage(approval::ApprovalRegistry::default()).manage(interactive::InteractiveSessions::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![interactive::start_interactive_cli, interactive::interactive_cli_input, interactive::resize_interactive_cli, interactive::interrupt_interactive_cli, interactive::close_interactive_cli, resolve_interactive_provider, stage_prompt_attachment, relevant_prompt_files, clear_agent_session, decide_agent_approval, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }

@@ -1,5 +1,8 @@
 import { analyzePrompt, validateSuggestion, isDirectCommand } from './promptOptimizer';
 import { TASK_TEMPLATES, TEMPLATE_VERSION, selectProjectContext } from './promptTemplates';
+import { it } from 'vitest';
+
+it('validates all deterministic prompt benchmark cases', () => {
 
 function assert(value:boolean, message:string):void {if(!value)throw Error(message);}
 const cases = [
@@ -28,3 +31,5 @@ assert(selectProjectContext([],['AGENTS.md','untrusted.txt'],false).instructions
 assert(selectProjectContext([],['AGENTS.md'],true).instructions.length===0,'do not repeat native session instructions');
 assert(analyzePrompt('Fix login',[],['AGENTS.md'],'detailed',true).suggestion.indexOf('Follow existing project instructions')<0,'existing session should not repeat project context');
 console.log('Prompt benchmark passed: '+cases.length+' deterministic cases');
+
+});

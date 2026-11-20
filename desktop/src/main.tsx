@@ -4,9 +4,12 @@ import remarkGfm from 'remark-gfm';
 import { createRoot } from 'react-dom/client';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
+import InteractiveTerminal from './InteractiveTerminal';
+import { validateAttachment, type PromptAttachment } from './promptAttachments';
 import { analyzePrompt, recommendedStrategy, emptyFeedback, promptDiff, validateSuggestion, estimateTokens, type Agent, type Strategy, type Feedback } from './promptOptimizer';
 
 function MarkdownAnswer({ text }: { text: string }) {
@@ -221,6 +224,23 @@ function App() {
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
+  const [attachments, setAttachments] = React.useState<PromptAttachment[]>([]);
+  const addAttachments = async () => {
+    if (!root || busy) return;
+    try {
+      const selected = await open({multiple:true, directory:false, title:'Attach files to prompt'});
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const staged: PromptAttachment[] = [...attachments];
+      for (const path of paths) {
+        const item = await invoke<PromptAttachment>('stage_prompt_attachment',{root,source:path});
+        const issue = validateAttachment(item,staged);
+        if (issue) { setError(`${item.name}: ${issue}`); continue; }
+        staged.push(item);
+      }
+      setAttachments(staged);
+    } catch (e) { setError(`Cannot attach file: ${String(e)}`); }
+  };
   const [messages, setMessages] = React.useState<Message[]>([]);
   React.useEffect(() => {
     if (!root) return;
@@ -251,10 +271,75 @@ function App() {
   React.useEffect(()=>{if(pendingPrompt)setSuggestedPrompt(optimizerAnalysis.suggestion);},[optimizerAnalysis,pendingPrompt]);
   const [permission, setPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
   const [busy, setBusy] = React.useState(false);
+  const [approval, setApproval] = React.useState<{id:string;requestId:string;provider:string;description:string;command?:string}|null>(null);
+  const [approvalSubmitting, setApprovalSubmitting] = React.useState(false);
+  const [terminalSession, setTerminalSession] = React.useState<string | null>(null);
+  const [terminalBusy, setTerminalBusy] = React.useState(false);
+  const [terminalExpanded, setTerminalExpanded] = React.useState(true);
+  const [terminalProvider, setTerminalProvider] = React.useState<Provider>('claude');
+  const [terminalPrompt, setTerminalPrompt] = React.useState('');
+  const [terminalRoot, setTerminalRoot] = React.useState('');
+  const [terminalPermission, setTerminalPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
+  const startTerminal = async (initialPrompt = ''): Promise<boolean> => {
+    if (!root.trim() || terminalBusy || busy) return false;
+    if (permission === 'full-access' && !window.confirm('Full access removes the OS sandbox and pre-approves supported agent tools. Continue?')) return false;
+    try {
+      const selected = provider === 'auto' || provider === 'balanced'
+        ? await invoke<Provider>('resolve_interactive_provider', {prompt:initialPrompt,mode:provider,permission})
+        : provider;
+      setTerminalProvider(selected);
+      setTerminalRoot(root);
+      setTerminalPermission(permission);
+      setTerminalPrompt(initialPrompt);
+      setTerminalSession(crypto.randomUUID());
+      setTerminalBusy(true);
+      setTerminalExpanded(true);
+      setError('');
+      return true;
+    } catch (error) { setError(String(error)); return false; }
+  };
+  const closeTerminal = async () => {
+    if (!terminalSession) return;
+    if (terminalBusy && !window.confirm('Terminate the running agent session? Unsaved CLI work may be interrupted.')) return;
+    try {
+      if (terminalBusy) await invoke('close_interactive_cli', {requestId:terminalSession});
+      setTerminalBusy(false);
+      setTerminalSession(null);
+      setTerminalExpanded(false);
+    } catch (error) { setError(String(error)); }
+  };
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
   React.useEffect(() => { if (startedAt === null) return; const id = window.setInterval(() => setElapsed(Math.floor((Date.now()-startedAt)/1000)), 1000); return () => window.clearInterval(id); }, [startedAt]);
   const [error, setError] = React.useState('');
+  // Native OS file drops are delivered by Tauri, not HTML drag/drop events.
+  const attachmentContext = React.useRef({root, busy, attachments});
+  attachmentContext.current = {root, busy, attachments};
+  React.useEffect(() => {
+    let disposed = false;
+    const unlisten = getCurrentWindow().onDragDropEvent(async event => {
+      if (event.payload.type !== 'drop') return;
+      const {root: workspace, busy: running} = attachmentContext.current;
+      if (!workspace || running) return;
+      try {
+        const staged = [...attachmentContext.current.attachments];
+        for (const path of event.payload.paths) {
+          const item = await invoke<PromptAttachment>('stage_prompt_attachment', {root: workspace, source: path});
+          const issue = validateAttachment(item, staged);
+          if (issue) { if (!disposed) setError(`${item.name}: ${issue}`); continue; }
+          staged.push(item);
+        }
+        if (!disposed) setAttachments(current => {
+          const merged = [...current];
+          for (const item of staged) if (!merged.some(existing => existing.path === item.path)) merged.push(item);
+          return merged;
+        });
+      } catch (error) {
+        if (!disposed) setError(`Cannot attach dropped file: ${String(error)}`);
+      }
+    });
+    return () => { disposed = true; void unlisten.then(stop => stop()); };
+  }, []);
   const [pendingSwitch, setPendingSwitch] = React.useState(false);
   const [failedPrompt, setFailedPrompt] = React.useState('');
   const [usage, setUsage] = React.useState<string>('Not reported');
@@ -265,7 +350,8 @@ function App() {
   const [limitNotice, setLimitNotice] = React.useState('');
   const [activity, setActivity] = React.useState('');
   const [agentSteps, setAgentSteps] = React.useState<AgentStep[]>([]);
-  const [showSteps, setShowSteps] = React.useState(false);
+  const [showSteps, setShowSteps] = React.useState(true);
+  const [lastEventAt, setLastEventAt] = React.useState<number | null>(null);
   const [timing, setTiming] = React.useState<{provider:string;preflightMs:number;executionMs:number;totalMs:number}|null>(null);
   const [flowTrace, setFlowTrace] = React.useState<{validationMs:number;gitMs:number;routingMs:number;authMs:number;fingerprintMs:number;preExecutionMs:number;frontendElapsedMs:number;bridgeMs:number}|null>(null);
   const [cliPhases, setCliPhases] = React.useState<{provider:string;setupMs:number;spawnMs:number;firstOutputMs:number|null;processMs:number;exitCode:number|null}|null>(null);
@@ -285,7 +371,7 @@ function App() {
     messagesEnd.current?.scrollIntoView({ block: 'end', behavior: 'instant' });
     const steps = stepsListRef.current;
     if (steps) steps.scrollTop = steps.scrollHeight;
-  }, [messages, liveText, agentSteps, activity, showSteps]);
+  }, [messages, liveText, agentSteps, activity, showSteps, approval]);
   const [githubOpen, setGithubOpen] = React.useState(false);
   const [repositories, setRepositories] = React.useState<GithubRepo[]>([]);
   const [repoFilter, setRepoFilter] = React.useState('');
@@ -354,11 +440,11 @@ function App() {
   };
   const submitPrompt = () => {
     const original=prompt.trim();
-    if(!original||busy||!root.trim())return;
+    if((!original && !attachments.length)||busy||!root.trim())return;
     if(original==='/clear'||original==='/new'){void clearSession();return;}
     const chosen=recommendedStrategy(feedback);
     setStrategy(chosen);setPendingPrompt(original);
-    setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion);
+    setSuggestedPrompt(original ? analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion : 'Review the attached files.');
   };
   const regenerateSuggestion = () => {
     if(!pendingPrompt)return;
@@ -366,22 +452,25 @@ function App() {
     trackOptimizer('regenerated');setStrategy(next);
   };
   const send = async (approvedText?: string) => {
-    const text = (approvedText ?? prompt).trim();
+    const originalText = (approvedText ?? prompt).trim();
+    const attachmentContext = attachments.length ? '\n\nAttached files (read these exact paths before answering):\n' + attachments.map(a => `- ${a.name} (${a.kind}): ${a.path}`).join('\n') : '';
+    const text = originalText + attachmentContext;
     if (text === '/clear' || text === '/new') { await clearSession(); return; }
-    if (!text || !root.trim() || busy) return;
+    if ((!originalText && !attachments.length) || !root.trim() || busy) return;
+    if (terminalBusy) { setError('An interactive CLI is running. Stop & close it before sending a chat prompt.'); return; }
     const id = String(++requestSeq.current);
     const requestedProvider = provider;
     const requestRoot = root;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
     if(pendingPrompt) setOptimizerMetrics(prev=>({...prev,runs:prev.runs+1,addedEstimate:prev.addedEstimate+estimateTokens(text)-estimateTokens(pendingPrompt)}));
-    setPrompt(''); setPendingPrompt(null); setSuggestedPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
+    setPrompt(''); setAttachments([]); setPendingPrompt(null); setSuggestedPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
     setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider === 'codex' ? 'codex' : 'claude');
-    setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
+    setApproval(null); setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
     setMessages(m => [...m, { role: 'user', text, provider: requestedProvider === 'codex' ? 'codex' : 'claude' }]);
     const requestStarted = Date.now();
     let completed = false;
     setTiming(null); setCliPhases(null); setFlowTrace(null); pendingPhases.current=null;
-    setAgentSteps([]);
+    setAgentSteps([]); setShowSteps(true); setLastEventAt(Date.now());
     let streamText = '';
     let codexSnapshot = '';
     let claudeSnapshot = '';
@@ -392,6 +481,12 @@ function App() {
         if (payload.requestId !== id) return;
         const data = payload.data;
         const kind = data.kind;
+        if (kind === 'approval_request') {
+          const approvalId = typeof data.approvalId === 'string' ? data.approvalId : '';
+          const description = typeof data.description === 'string' ? data.description : '';
+          if (approvalId && description) setApproval({id:approvalId,requestId:id,provider:String(data.provider||requestedProvider),description,command:typeof data.command==='string'?data.command:undefined});
+          return;
+        }
         if (kind === 'timing') {
           setTiming({provider:String(data.provider || ''),preflightMs:Number(data.preflightMs || 0),executionMs:Number(data.executionMs || 0),totalMs:Number(data.totalMs || 0)});
           // Backend monotonic durations and frontend wall-clock elapsed are separate clocks.
@@ -429,6 +524,7 @@ function App() {
         } else if (kind === 'activity') {
           const ev = data.event as Record<string,unknown> | undefined;
           if (ev) {
+            setLastEventAt(Date.now());
             const step = describeAgentStep(ev);
             if (step) setAgentSteps(previous=>[...previous,step].slice(-120));
             const eventType = String(ev.type || 'activity');
@@ -437,7 +533,9 @@ function App() {
               setLiveText(streamText);
             }
             const item = ev.item as Record<string,unknown> | undefined;
-            if (eventType !== 'external.chunk') setActivity(eventType + (item?.type ? ' · '+item.type : ''));
+            if (step) setActivity(step.label);
+            else if (eventType !== 'external.chunk' && eventType !== 'item.agent_message.delta' && eventType !== 'response.output_text.delta') setActivity(eventType + (item?.type ? ' · '+item.type : ''));
+            else if (eventType === 'item.agent_message.delta' || eventType === 'response.output_text.delta') setActivity('Streaming response');
             // Claude emits content_block_delta; Codex emits agent_message deltas.
             // Some CLI versions only emit completed messages: render those as snapshots.
             const nested = eventType === 'stream_event' ? ev.event as Record<string,unknown> | undefined : undefined;
@@ -502,7 +600,7 @@ function App() {
       await invoke<void>('run_prompt', {requestId:id,root:requestRoot,provider:requestedProvider,prompt:text,permission});
       if (!completed && !failed) setError('Agent finished without a structured result. Check CLI version.');
     } catch (e) { setError(String(e)); setPrompt(current => current || text); if (streamText) { setMessages(m=>[...m,{role:'assistant',text:streamText+'\n\n[Partial response — interrupted]',provider:requestedProvider === 'codex' ? 'codex' : 'claude'}]);setLiveText(''); } }
-    finally { unlisten?.(); setBusy(false); setStopping(false); setStartedAt(null); }
+    finally { unlisten?.(); setApproval(null); setBusy(false); setStopping(false); setStartedAt(null); }
   };
   return <div className="app">
     <aside className={`workspace-panel ${busy ? liveProvider : provider}`}><h2>AI Agent Manager</h2><AgentSetupWizard/><label>Workspace</label><button className="open-folder" disabled={busy} onClick={()=>void chooseFolder()}>Open Folder…</button><button className="open-folder" disabled={busy} onClick={()=>void loadGithub()}>Open from GitHub…</button><input aria-label="Git repository path" disabled={busy} placeholder="/path/to/git/repo" value={root} onChange={e=>setRoot(e.target.value)} onBlur={()=>{if(root.trim()&&!recent.includes(root.trim()))selectWorkspace(root.trim());}}/><label>Recent workspaces</label><div className="recent">{recent.map(path=><button key={path} title={path} className={path===root?'selected':''} disabled={busy} onClick={()=>selectWorkspace(path)}>{path.split('/').filter(Boolean).pop() || path}</button>)}</div><label>Permissions</label><select aria-label="Agent permissions" value={permission} disabled={busy} onChange={e=>setPermission(e.target.value as typeof permission)}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option><option value="full-access">Full access (unsafe)</option></select><p className="hint">{provider==='codex'?'Codex read-only and workspace-write use CLI filesystem sandboxing. Full access bypasses sandbox and approvals.':'Claude read-only restricts allowed tool names, not an OS sandbox. Workspace write uses acceptEdits (other operations may still be allowed). Full access skips permissions.'}</p><button disabled={busy || !root.trim()} onClick={()=>void clearSession()}>Clear session</button><p className="hint">Or type /clear. Resets Claude/Codex conversation context, not provider login or usage history.</p><label>Agent routing</label><div className="agents"><button disabled={busy} className={provider==='auto'?'active codex':''} onClick={()=>setProvider('auto')}>Auto</button><button disabled={busy} className={provider==='balanced'?'active codex':''} onClick={()=>setProvider('balanced')}>Balanced</button><button disabled={busy} className={provider==='claude'?'active claude':''} onClick={()=>setProvider('claude')}>Claude</button><button disabled={busy} className={provider==='codex'?'active codex':''} onClick={()=>setProvider('codex')}>Codex</button><button disabled={busy} className={provider==='antigravity'?'active codex':''} onClick={()=>setProvider('antigravity')}>Antigravity</button><button disabled={busy} className={provider==='opencode'?'active codex':''} onClick={()=>setProvider('opencode')}>OpenCode</button><button disabled={busy} className={provider==='copilot'?'active codex':''} onClick={()=>setProvider('copilot')}>Copilot</button></div><p className="hint">Auto uses local task rules and existing sessions to reduce handoffs; Balanced prioritizes session reuse. No extra AI routing call. Manual Claude/Codex/Antigravity/OpenCode/Copilot selection is available. Auto/Balanced can route to Antigravity when installed and workspace-write permissions are selected. Other providers may be tried when earlier candidates are unavailable. Provider limits never justify replaying uncertain edits.</p><div className="ai-config-panel"><div className="usage-heading"><strong>Setup & Diagnostics</strong><button onClick={()=>setDiagnosticsOpen(v=>!v)}>{diagnosticsOpen?'Hide':'Show'}</button></div>{diagnosticsOpen&&<><button onClick={()=>void refreshDiagnostics()}>Refresh checks</button>{diagnostics.map(d=><div className="diagnostic-item" key={d.name}><strong>{d.name}</strong><span className={'ai-status '+(d.status==='ready'?'supported':d.status==='missing'?'unsupported':'unknown')}>{d.status}</span><p>{d.detail}</p></div>)}<small>CLI detection does not verify authentication. Sign in using the provider CLI before your first request.</small></>}</div><div className="ai-config-panel">
@@ -572,7 +670,38 @@ function App() {
         <button className="clear-usage" disabled={busy||usageHistory.length===0} onClick={()=>{if(window.confirm('Clear desktop usage history for this workspace?')){localStorage.removeItem(USAGE_PREFIX+root);setUsageHistory([]);}}}>Clear desktop history</button>
       </>}
     </div></aside>
-    <main>{perfHistory.length>0&&<details className="hint" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}><summary>Agent performance · {perfHistory.length} runs · all providers</summary><div style={{overflowX:'auto'}}><table><thead><tr><th>Agent</th><th>Runs</th><th>Avg total</th><th>Min</th><th>Max</th><th>Avg first output</th></tr></thead><tbody>{(['claude','codex','antigravity','opencode','copilot'] as const).map(agent=>{const records=perfHistory.filter(r=>r.provider===agent);const avg=(values:number[])=>values.length?Math.round(values.reduce((a,b)=>a+b,0)/values.length)+' ms':'—';const first=records.map(r=>r.firstOutputMs).filter((v):v is number=>typeof v==='number');return <tr key={agent}><td>{agent}</td><td>{records.length}</td><td>{avg(records.map(r=>r.totalMs))}</td><td>{records.length?Math.min(...records.map(r=>r.totalMs))+' ms':'—'}</td><td>{records.length?Math.max(...records.map(r=>r.totalMs))+' ms':'—'}</td><td>{avg(first)}</td></tr>})}</tbody></table></div><button onClick={()=>{const header='timestamp,provider,preflight_ms,execution_ms,total_ms,setup_ms,spawn_ms,first_output_ms,process_ms,exit_code';const csv=[header,...perfHistory.map(r=>[r.timestamp,r.provider,r.preflightMs,r.executionMs,r.totalMs,r.setupMs??'',r.spawnMs??'',r.firstOutputMs??'',r.processMs??'',r.exitCode??''].join(','))].join('\n');void navigator.clipboard.writeText(csv);}}>Copy CSV</button><button onClick={()=>{if(window.confirm('Clear performance history for this workspace?')){localStorage.removeItem(perfKey(root));setPerfHistory([]);}}}>Clear measurements</button></details>}{timing&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>Timing · {timing.provider} · preflight {timing.preflightMs} ms · execution {timing.executionMs} ms · total {timing.totalMs} ms</div>}{flowTrace&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>Full flow · workspace {flowTrace.validationMs} ms · git {flowTrace.gitMs} ms · routing {flowTrace.routingMs} ms · auth {flowTrace.authMs} ms · fingerprint {flowTrace.fingerprintMs} ms · pre-execution {flowTrace.preExecutionMs} ms · frontend to timing event {flowTrace.frontendElapsedMs} ms · bridge/queue upper bound {flowTrace.bridgeMs} ms</div>}{cliPhases&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>CLI phases · {cliPhases.provider} · setup {cliPhases.setupMs} ms · spawn {cliPhases.spawnMs} ms · first output {cliPhases.firstOutputMs === null ? 'none' : cliPhases.firstOutputMs+' ms'} · process {cliPhases.processMs} ms · exit {cliPhases.exitCode ?? 'signal'}</div>}{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={`${m.role} ${m.role === "assistant" ? `provider-${m.provider}` : ""}`}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small>{m.role === 'assistant' ? <MarkdownAnswer text={m.text}/> : <pre>{m.text}</pre>}{m.role==='assistant'&&m.usage&&<details className="prompt-usage"><summary>Tokens for this prompt · {m.model} · {m.duration}s</summary><TokenTable usage={m.usage}/><small>Provider-reported turn usage, including repeated cached context. Uncached input is input minus cached input, not just your typed text. Raw numeric diagnostics: .git/ai-agent-manager/usage-diagnostics.jsonl.</small></details>}</article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><MarkdownAnswer text={liveText}/></article>}{busy&&agentSteps.length>0&&<div className="agent-steps"><button className="agent-steps-toggle" onClick={()=>setShowSteps(v=>!v)} aria-expanded={showSteps}>Agent activity · {agentSteps.length} events · {showSteps?'Hide':'Show'}</button>{showSteps&&<ol ref={stepsListRef} className="agent-steps-list">{agentSteps.map((step,i)=><li key={i} className={'agent-step-'+step.status}><span className="agent-step-time">{step.time}</span><span>{step.label}</span>{step.detail&&<pre className="agent-step-detail">{step.detail}</pre>}</li>)}</ol>}</div>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}</p>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}>{pendingPrompt!==null&&<div className="prompt-suggestion" role="region" aria-label="Suggested prompt" style={{padding:12,border:'1px solid var(--border, #777)',borderRadius:8,margin:8}}>
+    <main>
+    <section aria-label="Native CLI" className="native-terminal-panel">
+      <div className="native-terminal-toolbar">
+        <strong>CLI terminal (optional)</strong>
+        <span className="hint">{terminalSession ? `${terminalProvider} · ${terminalBusy ? 'Running' : 'Finished'}` : 'Not started'}</span>
+        <div className="native-terminal-controls">
+          {terminalSession && <button type="button" onClick={()=>setTerminalExpanded(expanded=>!expanded)} aria-expanded={terminalExpanded} aria-controls="native-cli-content">{terminalExpanded?'Hide terminal':'Show terminal'}</button>}
+          {terminalSession && <button type="button" onClick={()=>void closeTerminal()}>{terminalBusy?'Stop & close':'Close'}</button>}
+          {!terminalSession && <button type="button" disabled={busy||!root} onClick={()=>void startTerminal()}>Open CLI terminal</button>}
+        </div>
+      </div>
+      {terminalSession && <div id="native-cli-content" style={{display:terminalExpanded?'block':'none'}}>
+        <InteractiveTerminal key={terminalSession} requestId={terminalSession}
+          provider={terminalProvider} root={terminalRoot} permission={terminalPermission}
+          initialPrompt={terminalPrompt} onFinish={()=>setTerminalBusy(false)}
+          onError={setError}/>
+      </div>}
+    </section>
+    {perfHistory.length>0&&<details className="hint" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}><summary>Agent performance · {perfHistory.length} runs · all providers</summary><div style={{overflowX:'auto'}}><table><thead><tr><th>Agent</th><th>Runs</th><th>Avg total</th><th>Min</th><th>Max</th><th>Avg first output</th></tr></thead><tbody>{(['claude','codex','antigravity','opencode','copilot'] as const).map(agent=>{const records=perfHistory.filter(r=>r.provider===agent);const avg=(values:number[])=>values.length?Math.round(values.reduce((a,b)=>a+b,0)/values.length)+' ms':'—';const first=records.map(r=>r.firstOutputMs).filter((v):v is number=>typeof v==='number');return <tr key={agent}><td>{agent}</td><td>{records.length}</td><td>{avg(records.map(r=>r.totalMs))}</td><td>{records.length?Math.min(...records.map(r=>r.totalMs))+' ms':'—'}</td><td>{records.length?Math.max(...records.map(r=>r.totalMs))+' ms':'—'}</td><td>{avg(first)}</td></tr>})}</tbody></table></div><button onClick={()=>{const header='timestamp,provider,preflight_ms,execution_ms,total_ms,setup_ms,spawn_ms,first_output_ms,process_ms,exit_code';const csv=[header,...perfHistory.map(r=>[r.timestamp,r.provider,r.preflightMs,r.executionMs,r.totalMs,r.setupMs??'',r.spawnMs??'',r.firstOutputMs??'',r.processMs??'',r.exitCode??''].join(','))].join('\n');void navigator.clipboard.writeText(csv);}}>Copy CSV</button><button onClick={()=>{if(window.confirm('Clear performance history for this workspace?')){localStorage.removeItem(perfKey(root));setPerfHistory([]);}}}>Clear measurements</button></details>}{timing&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>Timing · {timing.provider} · preflight {timing.preflightMs} ms · execution {timing.executionMs} ms · total {timing.totalMs} ms</div>}{flowTrace&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>Full flow · workspace {flowTrace.validationMs} ms · git {flowTrace.gitMs} ms · routing {flowTrace.routingMs} ms · auth {flowTrace.authMs} ms · fingerprint {flowTrace.fingerprintMs} ms · pre-execution {flowTrace.preExecutionMs} ms · frontend to timing event {flowTrace.frontendElapsedMs} ms · bridge/queue upper bound {flowTrace.bridgeMs} ms</div>}{cliPhases&&<div className="hint" role="status" style={{padding:'8px 24px',borderBottom:'1px solid #303741'}}>CLI phases · {cliPhases.provider} · setup {cliPhases.setupMs} ms · spawn {cliPhases.spawnMs} ms · first output {cliPhases.firstOutputMs === null ? 'none' : cliPhases.firstOutputMs+' ms'} · process {cliPhases.processMs} ms · exit {cliPhases.exitCode ?? 'signal'}</div>}{limitNotice&&<div className="limit-banner" role="status">{limitNotice}</div>}{githubOpen&&<div className="github-panel"><div className="github-heading"><strong>GitHub repositories</strong><button onClick={()=>setGithubOpen(false)}>Close</button></div><p className="hint">Uses your authenticated GitHub CLI (gh). Clone a repository to a local folder before running agents.</p><input aria-label="Search GitHub repositories" placeholder="Search repositories…" value={repoFilter} onChange={e=>setRepoFilter(e.target.value)}/>{loadingRepos&&<p>Loading repositories…</p>}<div className="github-list">{repositories.filter(r=>r.nameWithOwner.toLowerCase().includes(repoFilter.toLowerCase())).map(r=><div className="github-repo" key={r.nameWithOwner}><div><strong>{r.nameWithOwner}</strong><small>{r.isPrivate?'Private':'Public'}</small><p>{r.description}</p></div><button disabled={cloning} onClick={()=>void cloneGithub(r.nameWithOwner)}>{cloning?'Cloning…':'Clone'}</button></div>)}</div></div>}<header><strong>Project session</strong><span>{root || 'Choose a Git repository'}</span></header><section className="messages" aria-live="polite">{messages.length===0&&<p className="empty">Choose a Git workspace and send your first request.</p>}{messages.map((m,i)=><article key={i} className={`${m.role} ${m.role === "assistant" ? `provider-${m.provider}` : ""}`}><small>{m.role==='user'?'YOU':m.provider.toUpperCase()}</small>{m.role === 'assistant' ? <MarkdownAnswer text={m.text}/> : <pre>{m.text}</pre>}{m.role==='assistant'&&m.usage&&<details className="prompt-usage"><summary>Tokens for this prompt · {m.model} · {m.duration}s</summary><TokenTable usage={m.usage}/><small>Provider-reported turn usage, including repeated cached context. Uncached input is input minus cached input, not just your typed text. Raw numeric diagnostics: .git/ai-agent-manager/usage-diagnostics.jsonl.</small></details>}</article>)}{busy&&liveText&&<article className="streaming"><small>{liveProvider.toUpperCase()} · LIVE</small><MarkdownAnswer text={liveText}/></article>}{busy&&agentSteps.length>0&&<div className="agent-steps"><button className="agent-steps-toggle" onClick={()=>setShowSteps(v=>!v)} aria-expanded={showSteps}>Agent activity · {agentSteps.length} events · {showSteps?'Hide':'Show'}</button>{showSteps&&<ol ref={stepsListRef} className="agent-steps-list">{agentSteps.map((step,i)=><li key={i} className={'agent-step-'+step.status}><span className="agent-step-time">{step.time}</span><span>{step.label}</span>{step.detail&&<pre className="agent-step-detail">{step.detail}</pre>}</li>)}</ol>}</div>}{busy&&<p className="hint" role="status">{lastProvider.toUpperCase()} working… {elapsed}s · {activity}{lastEventAt && Date.now()-lastEventAt>=30000 ? ` · No new activity for ${Math.floor((Date.now()-lastEventAt)/1000)}s (agent may still be working)` : ''}</p>}{approval&&<section role="alertdialog" aria-modal="true" aria-labelledby="agent-approval-title" style={{padding:20,border:'2px solid #d9a441',margin:16,borderRadius:8,background:'#1b222b'}}>
+      <h3 id="agent-approval-title">Agent permission required · {approval.provider}</h3>
+      <p style={{whiteSpace:'pre-wrap'}}>{approval.description}</p>
+      {approval.command&&<pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{approval.command}</pre>}
+      <p>Review the requested action. Denying it must not grant access.</p>
+      <div style={{display:'flex',gap:12}}>
+        {([false,true] as const).map(allow=><button key={String(allow)} disabled={approvalSubmitting} onClick={async()=>{
+          setApprovalSubmitting(true);
+          try { await invoke('decide_agent_approval',{approvalId:approval.id,requestId:approval.requestId,allow}); setApproval(null); }
+          catch(e){setError(String(e));}
+          finally{setApprovalSubmitting(false);}
+        }}>{allow?'Approve once':'Deny'}</button>)}
+      </div>
+    </section>}<div ref={messagesEnd} aria-hidden="true" /></section>{error&&<div className="error" role="alert"><p>{error}</p>{pendingSwitch&&<div className="recovery"><p>Claude reached a limit. Codex is now selected for the next request. The failed request was NOT replayed because previous file changes could not be verified. Review Git changes first.</p><button onClick={()=>{setPrompt('Continue the previous task using the current repository state. First inspect existing changes and do not repeat completed operations. Previous request: '+failedPrompt);setPendingSwitch(false);setError('');}}>Prepare safe continuation prompt</button></div>}</div>}<footer className={`composer ${busy ? liveProvider : provider}`}>{pendingPrompt!==null&&<div className="prompt-suggestion" role="region" aria-label="Suggested prompt" style={{padding:12,border:'1px solid var(--border, #777)',borderRadius:8,margin:8}}>
 <strong>Suggested improved prompt</strong>
 <p className="hint">Local scripts only · no AI calls · {optimizerAnalysis.kind} · clarity heuristic {optimizerAnalysis.clarity}% · {strategy} · ~{optimizerAnalysis.estimate} tokens (rough estimate)</p>
 {optimizerAnalysis.missing.length>0&&<p className="hint">Missing details: {optimizerAnalysis.missing.join(' ')}</p>}
@@ -590,7 +719,7 @@ function App() {
 <button disabled={busy} onClick={()=>{trackOptimizer('rejected');void send(pendingPrompt);}}>Reject & send original</button>
 <button disabled={busy} onClick={()=>{setPendingPrompt(null);setSuggestedPrompt('');}}>Cancel</button>
 </div><p className="hint">Local usage: {optimizerMetrics.runs} submitted · ~{optimizerMetrics.addedEstimate} net added tokens (estimate, not savings). Feedback: {feedback.approved} accepted · {feedback.edited} edited · {feedback.rejected} rejected. No prompt text stored in feedback.</p>
-</div>}<textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Antigravity" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Antigravity" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
+</div>}<div className="prompt-attachments"><button type="button" disabled={busy||!root} onClick={()=>void addAttachments()}>+ Attach files</button>{attachments.map(a=><span key={a.path} className="attachment-chip">{a.name} <button type="button" aria-label={`Remove ${a.name}`} onClick={()=>setAttachments(items=>items.filter(v=>v.path!==a.path))}>×</button></span>)}</div><textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Antigravity" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Antigravity" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);

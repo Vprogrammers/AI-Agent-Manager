@@ -1,4 +1,7 @@
 import { analyzePrompt, isDirectCommand, recommendedStrategy, emptyFeedback, validateSuggestion, promptDiff, followupContext, dedupeGuidance, compareExecutionEvidence } from './promptOptimizer';
+import { it } from 'vitest';
+
+it('validates prompt optimizer behavior and safeguards', () => {
 
 function assert(condition:boolean, message:string):void {if(!condition)throw Error(message);}
 assert(isDirectCommand('git status'),'git status must bypass expansion');
@@ -23,3 +26,5 @@ assert(analyzePrompt('Implement login',[],[],'detailed',false,'codex','',0).unch
 assert(dedupeGuidance(['Run tests','Execute tests']).length===1,'semantic alias dedup');
 assert(compareExecutionEvidence({testsPassed:5,testsFailed:1},{testsPassed:6,testsFailed:0}).verdict==='better','quality evidence comparison');
 assert(compareExecutionEvidence({},{testsPassed:1,testsFailed:0}).verdict==='inconclusive','missing evidence must not claim improvement');
+
+});
