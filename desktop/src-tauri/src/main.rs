@@ -772,33 +772,40 @@ async fn run_external_provider(app: &tauri::AppHandle, request_id: &str, root: &
     result
 }
 
-// Deterministic routing: task fit first, availability second. No paid model calls.
+// Deterministic routing: explicit choice, primary intent, then availability.
+// Verification words alone must not override an implementation or architecture task.
 fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static str> {
     let p = prompt.to_lowercase();
-    let contains_any = |terms: &[&str]| terms.iter().any(|term| p.contains(term));
-    let ordered: Vec<&str> = if contains_any(&["antigravity", "gemini", "agy"]) {
-        vec!["antigravity", "claude", "codex", "opencode", "copilot"]
-    } else if contains_any(&["review", "audit", "security", "bug", "test", "debug", "grešk", "gresk", "testir", "provjer", "prover"]) {
-        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
-    } else if contains_any(&["architecture", "design", "refactor", "plan", "arhitektur", "dizajn", "planir"]) {
-        vec!["claude", "antigravity", "codex", "opencode", "copilot"]
-    } else if contains_any(&["github", "pull request", "issue"]) {
+    let has = |terms: &[&str]| terms.iter().any(|term| p.contains(term));
+    let providers = ["claude", "codex", "antigravity", "opencode", "copilot"];
+    let explicit = providers.iter().copied().find(|id| {
+        let markers = [
+            format!("use {id}"), format!("koristi {id}"),
+            format!("with {id}"), format!("sa {id}"),
+            format!("via {id}"), format!("@{id}"),
+        ];
+        markers.iter().any(|marker| p.contains(marker))
+    });
+    let ordered: Vec<&str> = if let Some(id) = explicit {
+        std::iter::once(id).chain(providers.iter().copied().filter(|candidate| *candidate != id)).collect()
+    } else if mode == "balanced" {
+        vec!["claude", "codex", "antigravity", "opencode", "copilot"]
+    } else if has(&["github", "pull request", "create issue", "otvori issue"]) {
         vec!["copilot", "codex", "claude", "antigravity", "opencode"]
-    } else if contains_any(&["explain", "document", "summar", "objasn", "dokument", "saž", "saz", "analizir", "analiz", "prijedlog", "predlog"]) {
+    } else if has(&["implement", "implementir", "popravi", "ispravi", "fix ", "izmeni", "izmijeni", "promeni", "promijeni", "dodaj", "napravi", "uradi", "sredi", "code change"]) {
+        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
+    } else if has(&["architecture", "arhitektur", "design", "dizajn", "refactor", "planir", "roadmap"]) {
+        vec!["claude", "codex", "antigravity", "opencode", "copilot"]
+    } else if has(&["security", "audit", "debug", "bug", "test failure", "failing test", "regression", "grešk", "gresk"]) {
+        vec!["codex", "claude", "antigravity", "opencode", "copilot"]
+    } else if has(&["explain", "document", "summar", "objasn", "dokument", "saž", "saz", "analizir", "analiz", "prijedlog", "predlog"]) {
         vec!["antigravity", "claude", "codex", "opencode", "copilot"]
     } else {
-        vec!["codex", "antigravity", "claude", "opencode", "copilot"]
+        vec!["claude", "codex", "antigravity", "opencode", "copilot"]
     };
-    let mut candidates: Vec<&str> = ordered.into_iter().filter(|id|
+    ordered.into_iter().filter(|id|
         permission == "workspace-write" || ["claude", "codex"].contains(id)
-    ).collect();
-    if mode == "balanced" {
-        // Balanced prefers general-purpose agents, while respecting task constraints.
-        candidates.sort_by_key(|id| match *id {
-            "claude" => 0, "codex" => 1, "antigravity" => 2, "opencode" => 3, _ => 4
-        });
-    }
-    candidates
+    ).collect()
 }
 
 #[cfg(test)]
@@ -857,6 +864,19 @@ mod routing_tests {
         assert!(provider_available("codex", &cooldowns));
     }
 
+    #[test]
+    fn routing_prioritizes_primary_intent_over_generic_verification() {
+        let prompt = "Procitaj handoff, proveri Git stanje, popravi valutu u formi i testiraj.";
+        assert_eq!(route_candidates(prompt, "auto", "workspace-write")[0], "codex");
+        assert_eq!(route_candidates("Proveri Git stanje i nastavi plan arhitekture", "auto", "workspace-write")[0], "claude");
+        assert_eq!(route_candidates("Proveri Git stanje", "auto", "workspace-write")[0], "claude");
+    }
+    #[test]
+    fn routing_respects_explicit_provider_and_balanced() {
+        assert_eq!(route_candidates("Koristi Codex za arhitekturu", "auto", "workspace-write")[0], "codex");
+        assert_eq!(route_candidates("Use Antigravity to debug", "balanced", "workspace-write")[0], "antigravity");
+        assert_eq!(route_candidates("Implement feature", "balanced", "workspace-write")[0], "claude");
+    }
     #[test]
     fn balanced_is_stable() {
         assert_eq!(route_candidates("Explain this", "balanced", "workspace-write")[0], "claude");
