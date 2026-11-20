@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tauri::Manager;
 mod project_architect;
 mod approval;
+mod interactive;
 
 fn configure_agent_path() {
     // Finder/Dock launches often lack the user's interactive shell PATH.
@@ -1474,6 +1475,6 @@ fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).manage(approval::ApprovalRegistry::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![stage_prompt_attachment, relevant_prompt_files, clear_agent_session, decide_agent_approval, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).manage(approval::ApprovalRegistry::default()).manage(interactive::InteractiveSessions::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![interactive::start_interactive_cli, interactive::interactive_cli_input, interactive::interrupt_interactive_cli, stage_prompt_attachment, relevant_prompt_files, clear_agent_session, decide_agent_approval, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
