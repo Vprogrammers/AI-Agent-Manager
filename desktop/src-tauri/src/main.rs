@@ -811,11 +811,8 @@ fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static 
     } else {
         vec!["claude", "codex", "antigravity", "opencode", "copilot"]
     };
-    // Auto prefers Claude for all tasks. Explicit provider selection still takes precedence;
-    // Balanced retains its own ordering. Codex is a fallback, not the default coding agent.
-    let ordered = if mode == "auto" && explicit.is_none() {
-        std::iter::once("claude").chain(ordered.into_iter().filter(|id| *id != "claude")).collect::<Vec<_>>()
-    } else { ordered };
+    // Keep task-fit ordering in auto mode. Explicit provider selection always wins.
+    // Balanced intentionally retains its stable default order.
     ordered.into_iter().filter(|id|
         permission == "workspace-write" || ["claude", "codex"].contains(id)
     ).collect()
@@ -1124,7 +1121,7 @@ fn workspace_fingerprint(root: &Path) -> Result<Vec<u8>, String> {
 
 // A provider handoff must account for edits made by the previous provider.
 fn continuation_prompt(original: &str) -> String {
-    format!("You are taking over an IN-PROGRESS task from another agent. Continue from the CURRENT workspace, not from scratch. Inspect git status, git diff (staged and unstaged), recent commits, and relevant files first. Preserve all existing edits, including uncommitted work. Determine what has already been completed; do not repeat completed edits or external side effects (publishing, deleting, payments, API writes). If an operation cannot be verified, ask for confirmation before repeating it. Keep the original project instructions and constraints. Original request:\n{original}")
+    format!("You are taking over an IN-PROGRESS task from another agent. Continue from the CURRENT workspace, not from scratch. Inspect git status and diff first (staged and unstaged), then recent commits and relevant files. Preserve all existing edits, including uncommitted work. Determine what has already been completed; do not repeat completed edits or external side effects (publishing, deleting, payments, API writes). If an operation cannot be verified, ask for confirmation before repeating it. Keep the original project instructions and constraints. Original request:\n{original}")
 }
 
 #[cfg(test)]
@@ -1187,21 +1184,28 @@ mod execution_fallback_tests {
     #[test]
     fn seatbelt_permissions_limit_workspace_writes() {
         use super::macos_sandbox_profile;
-        use std::path::Path;
-        let root = Path::new("/tmp/aam-test");
-        let read_only = macos_sandbox_profile(root, "read-only", "codex").unwrap();
-        let write = macos_sandbox_profile(root, "workspace-write", "codex").unwrap();
-        assert!(!read_only.contains(r#"(subpath "/tmp/aam-test")"#));
-        assert!(write.contains(r#"(subpath "/tmp/aam-test")"#));
-        assert!(macos_sandbox_profile(root, "full-access", "codex").is_err());
-        let opencode = macos_sandbox_profile(root, "workspace-write", "opencode").unwrap();
+        use std::process::Command;
+        // A Seatbelt profile resolves the actual Git metadata location.
+        // Test against a real repository, never a nonexistent hardcoded path.
+        let root = std::env::temp_dir().join(format!("aam-seatbelt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git").arg("init").arg("-q").arg(&root).status().unwrap().success());
+        let read_only = macos_sandbox_profile(&root, "read-only", "codex").unwrap();
+        let write = macos_sandbox_profile(&root, "workspace-write", "codex").unwrap();
+        let workspace_grant = format!(r#"(subpath "{}")"#, root.display());
+        assert!(!read_only.contains(&workspace_grant));
+        assert!(write.contains(&workspace_grant));
+        assert!(macos_sandbox_profile(&root, "full-access", "codex").is_err());
+        let opencode = macos_sandbox_profile(&root, "workspace-write", "opencode").unwrap();
         assert!(opencode.contains(".local/share/opencode"));
         assert!(opencode.contains(".cache/opencode"));
         assert!(!write.contains(".local/share/opencode"));
-        let copilot = macos_sandbox_profile(root, "workspace-write", "copilot").unwrap();
+        let copilot = macos_sandbox_profile(&root, "workspace-write", "copilot").unwrap();
         assert!(copilot.contains(".copilot"));
         assert!(!write.contains(".copilot"));
         assert!(!opencode.contains(".copilot"));
+        std::fs::remove_dir_all(&root).unwrap();
 
     }
     #[test]
