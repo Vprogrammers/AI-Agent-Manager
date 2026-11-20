@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { createRoot } from 'react-dom/client';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
@@ -273,6 +274,34 @@ function App() {
   const [elapsed, setElapsed] = React.useState(0);
   React.useEffect(() => { if (startedAt === null) return; const id = window.setInterval(() => setElapsed(Math.floor((Date.now()-startedAt)/1000)), 1000); return () => window.clearInterval(id); }, [startedAt]);
   const [error, setError] = React.useState('');
+  // Native OS file drops are delivered by Tauri, not HTML drag/drop events.
+  const attachmentContext = React.useRef({root, busy, attachments});
+  attachmentContext.current = {root, busy, attachments};
+  React.useEffect(() => {
+    let disposed = false;
+    const unlisten = getCurrentWindow().onDragDropEvent(async event => {
+      if (event.payload.type !== 'drop') return;
+      const {root: workspace, busy: running} = attachmentContext.current;
+      if (!workspace || running) return;
+      try {
+        const staged = [...attachmentContext.current.attachments];
+        for (const path of event.payload.paths) {
+          const item = await invoke<PromptAttachment>('stage_prompt_attachment', {root: workspace, source: path});
+          const issue = validateAttachment(item, staged);
+          if (issue) { if (!disposed) setError(`${item.name}: ${issue}`); continue; }
+          staged.push(item);
+        }
+        if (!disposed) setAttachments(current => {
+          const merged = [...current];
+          for (const item of staged) if (!merged.some(existing => existing.path === item.path)) merged.push(item);
+          return merged;
+        });
+      } catch (error) {
+        if (!disposed) setError(`Cannot attach dropped file: ${String(error)}`);
+      }
+    });
+    return () => { disposed = true; void unlisten.then(stop => stop()); };
+  }, []);
   const [pendingSwitch, setPendingSwitch] = React.useState(false);
   const [failedPrompt, setFailedPrompt] = React.useState('');
   const [usage, setUsage] = React.useState<string>('Not reported');
