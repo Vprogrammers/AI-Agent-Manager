@@ -25,8 +25,8 @@ fn handle(mut socket: UnixStream, app: AppHandle, request_id: String, token: Str
     let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
     // NDJSON can arrive in multiple reads; never assume one read is a frame.
     let mut buffer = Vec::new();
-    let n = match BufReader::new(&socket).take(65_537).read_until(b'\\n', &mut buffer) {
-        Ok(n) if n > 0 && n <= 65_536 && buffer.last() == Some(&b'\\n') => n,
+    let n = match BufReader::new(&socket).take(65_537).read_until(b'\n', &mut buffer) {
+        Ok(n) if n > 0 && n <= 65_536 && buffer.last() == Some(&b'\n') => n,
         _ => return,
     };
     let parsed: Value = match serde_json::from_slice(&buffer[..n]) { Ok(v) => v, Err(_) => return };
