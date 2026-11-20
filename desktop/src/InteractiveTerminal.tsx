@@ -48,6 +48,7 @@ export default function InteractiveTerminal({
     let disposed = false;
     let stop: (() => void) | undefined;
     const resize = new ResizeObserver(() => {
+      if (!container.current || !container.current.getClientRects().length) return;
       fit.fit();
       void invoke('resize_interactive_cli', {
         requestId, rows: term.rows, cols: term.cols,
@@ -90,8 +91,8 @@ export default function InteractiveTerminal({
   }, [requestId]);
 
   return <section aria-label={provider + ' interactive terminal'} style={{ padding: 12 }}>
-    <p>Original {provider} CLI · native approval prompts · {permission} permissions</p>
-    <div ref={container} style={{ height: 400, width: '100%', background: '#101820' }} />
+    <p style={{margin:'0 0 8px',fontSize:12}}>Original {provider} CLI · native approval prompts · {permission} permissions</p>
+    <div ref={container} style={{ height: 'clamp(130px, 23dvh, 260px)', width: '100%', background: '#101820' }} />
     {running && <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
       <input
         aria-label="Send text to agent terminal"
