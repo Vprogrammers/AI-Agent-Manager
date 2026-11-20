@@ -279,20 +279,22 @@ function App() {
   const [terminalPrompt, setTerminalPrompt] = React.useState('');
   const [terminalRoot, setTerminalRoot] = React.useState('');
   const [terminalPermission, setTerminalPermission] = React.useState<'read-only'|'workspace-write'|'full-access'>('workspace-write');
-  const startTerminal = (initialPrompt = '') => {
-    if (!root.trim() || terminalBusy || busy) return;
-    if (provider === 'auto' || provider === 'balanced') {
-      setError('Choose a specific agent for its native interactive session.');
-      return;
-    }
-    if (permission === 'full-access' && !window.confirm('Full access removes the OS sandbox. The provider may run tools without further approval. Continue?')) return;
-    setTerminalProvider(provider);
-    setTerminalRoot(root);
-    setTerminalPermission(permission);
-    setTerminalPrompt(initialPrompt);
-    setTerminalSession(crypto.randomUUID());
-    setTerminalBusy(true);
-    setError('');
+  const startTerminal = async (initialPrompt = ''): Promise<boolean> => {
+    if (!root.trim() || terminalBusy || busy) return false;
+    if (permission === 'full-access' && !window.confirm('Full access removes the OS sandbox and pre-approves supported agent tools. Continue?')) return false;
+    try {
+      const selected = provider === 'auto' || provider === 'balanced'
+        ? await invoke<Provider>('resolve_interactive_provider', {prompt:initialPrompt,mode:provider,permission})
+        : provider;
+      setTerminalProvider(selected);
+      setTerminalRoot(root);
+      setTerminalPermission(permission);
+      setTerminalPrompt(initialPrompt);
+      setTerminalSession(crypto.randomUUID());
+      setTerminalBusy(true);
+      setError('');
+      return true;
+    } catch (error) { setError(String(error)); return false; }
   };
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
@@ -425,6 +427,7 @@ function App() {
     } catch (e) { setError('Cannot clear session: ' + String(e)); }
   };
   const submitPrompt = () => {
+    if (terminalBusy) return;
     const original=prompt.trim();
     if((!original && !attachments.length)||busy||terminalBusy||!root.trim())return;
     if(original==='/clear'||original==='/new'){void clearSession();return;}
@@ -443,12 +446,11 @@ function App() {
     const text = originalText + attachmentContext;
     if (text === '/clear' || text === '/new') { await clearSession(); return; }
     if (!originalText && !attachments.length || !root.trim() || busy) return;
-    if (provider !== 'auto' && provider !== 'balanced') {
-      if (terminalBusy) { setError('The interactive CLI is already running. Continue in its terminal.'); return; }
-      startTerminal(text);
+    if (terminalBusy) { setError('The interactive CLI is already running. Continue in its terminal.'); return; }
+    if (await startTerminal(text)) {
       setPendingPrompt(null); setSuggestedPrompt(''); setPrompt(''); setAttachments([]);
-      return;
     }
+    return;
     const id = String(++requestSeq.current);
     const requestedProvider = provider;
     const requestRoot = root;
@@ -665,7 +667,7 @@ function App() {
     <section aria-label="Native CLI" style={{margin:'12px 16px',border:'1px solid #54677a',borderRadius:8}}>
       <div style={{padding:12,display:'flex',alignItems:'center',gap:10}}>
         <strong>Interactive CLI</strong>
-        <button type="button" disabled={busy||terminalBusy||!root||provider==='auto'||provider==='balanced'} onClick={()=>startTerminal()}>Open {provider} terminal</button>
+        <button type="button" disabled={busy||terminalBusy||!root} onClick={()=>void startTerminal()}>Open {provider} terminal</button>
         <small>Provider-native approval menus; approved permission level from left panel applies to this session.</small>
       </div>
       {terminalSession&&<InteractiveTerminal key={terminalSession} requestId={terminalSession}
