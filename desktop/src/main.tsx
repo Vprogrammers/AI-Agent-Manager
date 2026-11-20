@@ -687,7 +687,7 @@ function App() {
       <p className="hint">Runs the original CLI with its own approval prompts and session. Select a specific agent and Full access explicitly. This terminal is not OS-sandboxed; review every command before approving. The standard prompt runner remains separate.</p>
       {terminalSession&&<>
         <p className="hint">{terminalProvider} · {terminalBusy?'Running':'Exited'}</p>
-        <pre aria-label="Interactive CLI output" role="log" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:350,overflowY:'auto',background:'#101820',padding:12,borderRadius:6}}>{terminalText.replace(/\\x1b\\[[0-?]*[ -/]*[@-~]/g,'').replace(/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)/g,'')}</pre>
+        <pre aria-label="Interactive CLI output" role="log" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:350,overflowY:'auto',background:'#101820',padding:12,borderRadius:6}}>{terminalText.replace(/\\x1b\\[[0-?]*[ -/]*[@-~]/g,'').replace(/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\)/g,'')}</pre>
         <form onSubmit={e=>{e.preventDefault();void sendTerminal(terminalInput+'\\r');setTerminalInput('');}} style={{display:'flex',gap:8}}>
           <input aria-label="Interactive CLI input" placeholder="Type response to the CLI prompt" value={terminalInput} disabled={!terminalBusy} onChange={e=>setTerminalInput(e.target.value)} onKeyDown={e=>{
             if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){
