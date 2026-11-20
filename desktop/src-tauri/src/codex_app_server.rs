@@ -109,15 +109,19 @@ pub async fn run(
                     let command_text = params.get("command").map(|v| {
                         if let Some(s) = v.as_str() {s.to_owned()} else {v.to_string()}
                     }).or_else(|| params.get("cwd").and_then(Value::as_str).map(str::to_owned));
-                    let receiver = approvals.register(approval_id.clone(), request_id.to_owned())?;
-                    notification(app, request_id, json!({
-                        "kind":"approval_request","provider":"codex",
-                        "approvalId":approval_id,"description":description,
-                        "command":command_text,"method":method
-                    }));
-                    // A missing/expired UI response is a denial, never an implicit allow.
-                    let allow = tokio::time::timeout(Duration::from_secs(120), receiver)
-                        .await.ok().and_then(Result::ok).unwrap_or(false);
+                    let allow = if permission == "full-access" {
+                        true // Full access was explicitly approved before this request.
+                    } else {
+                        let receiver = approvals.register(approval_id.clone(), request_id.to_owned())?;
+                        notification(app, request_id, json!({
+                            "kind":"approval_request","provider":"codex",
+                            "approvalId":approval_id,"description":description,
+                            "command":command_text,"method":method
+                        }));
+                        // Missing/expired approval is a denial.
+                        tokio::time::timeout(Duration::from_secs(120), receiver)
+                            .await.ok().and_then(Result::ok).unwrap_or(false)
+                    };
                     let reply = approval_response(method, params, allow);
                     send(&mut stdin, json!({"id":id, "result":reply})).await?;
                 } else if !id.is_null() {
