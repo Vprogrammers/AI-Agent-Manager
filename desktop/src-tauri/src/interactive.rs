@@ -77,6 +77,26 @@ fn provider_command(
     }
 }
 
+/// Native provider permission flags, never inferred from terminal output.
+/// Unsupported provider/permission combinations retain their interactive prompts.
+fn permission_args(provider: &str, permission: &str) -> Vec<&'static str> {
+    match (provider, permission) {
+        ("claude", "read-only") => vec!["--permission-mode", "plan"],
+        ("claude", "workspace-write") => vec!["--permission-mode", "acceptEdits"],
+        ("claude", "full-access") => vec!["--permission-mode", "bypassPermissions"],
+        ("codex", "read-only") => vec!["--sandbox", "read-only", "--ask-for-approval", "on-request"],
+        ("codex", "workspace-write") => vec!["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+        ("codex", "full-access") => vec!["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
+        // Copilot can auto-approve its tools within an OS-enforced workspace sandbox.
+        // The read-only mode retains provider permission prompts.
+        ("copilot", "workspace-write") => vec!["--allow-all-tools"],
+        ("copilot", "full-access") => vec!["--allow-all-tools", "--allow-all-paths"],
+        // OpenCode / Antigravity retain the native CLI permission configuration:
+        // do not invent undocumented flags or assume their persisted rules are safe.
+        _ => vec![],
+    }
+}
+
 #[tauri::command]
 pub fn start_interactive_cli(
     app: AppHandle,
@@ -105,6 +125,12 @@ pub fn start_interactive_cli(
         rows: 30, cols: 110, pixel_width: 0, pixel_height: 0,
     }).map_err(|e| format!("PTY unavailable: {e}"))?;
     let mut cmd = provider_command(&executable, &workspace, &provider, &permission)?;
+    // The left panel selects the maximum approved scope. Configure each
+    // provider's OWN approval engine so approved work proceeds automatically;
+    // the OS sandbox remains authoritative in restricted modes.
+    for arg in permission_args(&provider, &permission) {
+        cmd.arg(arg);
+    }
     cmd.cwd(&workspace);
     // Do not inject bypass flags or non-interactive -p flags: the CLI owns its
     // permission prompts, and this process remains alive while the user decides.
@@ -193,5 +219,9 @@ mod tests {
         }
         assert!(provider_binary("sh").is_err());
         assert!(provider_binary("claude; echo unsafe").is_err());
+        assert!(permission_args("claude", "workspace-write").contains(&"acceptEdits"));
+        assert!(permission_args("codex", "workspace-write").contains(&"on-request"));
+        assert!(!permission_args("codex", "read-only").contains(&"never"));
+        assert!(permission_args("copilot", "workspace-write").contains(&"--allow-all-tools"));
     }
 }
