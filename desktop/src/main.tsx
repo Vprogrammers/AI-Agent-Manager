@@ -459,7 +459,7 @@ function App() {
     if (!originalText && !attachments.length || !root.trim() || busy) return;
     if (terminalBusy && terminalSession) {
       try {
-        await invoke('interactive_cli_input', {requestId:terminalSession,input:text+'\\r'});
+        await invoke('interactive_cli_input', {requestId:terminalSession,input:text+'\r'});
         setTerminalExpanded(true);
         setPendingPrompt(null); setSuggestedPrompt(''); setPrompt(''); setAttachments([]);
       } catch (error) { setError(String(error)); }
