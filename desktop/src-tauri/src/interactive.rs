@@ -91,6 +91,9 @@ fn permission_args(provider: &str, permission: &str) -> Vec<&'static str> {
         // The read-only mode retains provider permission prompts.
         ("copilot", "workspace-write") => vec!["--allow-all-tools"],
         ("copilot", "full-access") => vec!["--allow-all-tools", "--allow-all-paths"],
+        ("antigravity", "read-only") => vec!["--mode=plan"],
+        ("antigravity", "workspace-write") => vec!["--mode=accept-edits"],
+        ("antigravity", "full-access") => vec!["--dangerously-skip-permissions"],
         // OpenCode / Antigravity retain the native CLI permission configuration:
         // do not invent undocumented flags or assume their persisted rules are safe.
         _ => vec![],
@@ -130,6 +133,18 @@ pub fn start_interactive_cli(
     // the OS sandbox remains authoritative in restricted modes.
     for arg in permission_args(&provider, &permission) {
         cmd.arg(arg);
+    }
+    if provider == "opencode" {
+        // OpenCode V2 native permissions. Explicitly approved tools run without
+        // repeated dialogs; the outer OS sandbox still limits filesystem writes.
+        let mode = if permission == "read-only" {
+            r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"},{"action":"edit","resource":"*","effect":"deny"},{"action":"external_directory","resource":"*","effect":"deny"}]}"#
+        } else if permission == "workspace-write" {
+            r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"},{"action":"external_directory","resource":"*","effect":"deny"}]}"#
+        } else {
+            r#"{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}"#
+        };
+        cmd.env("OPENCODE_CONFIG_CONTENT", mode);
     }
     cmd.cwd(&workspace);
     // Do not inject bypass flags or non-interactive -p flags: the CLI owns its
@@ -223,5 +238,6 @@ mod tests {
         assert!(permission_args("codex", "workspace-write").contains(&"on-request"));
         assert!(!permission_args("codex", "read-only").contains(&"never"));
         assert!(permission_args("copilot", "workspace-write").contains(&"--allow-all-tools"));
+        assert!(permission_args("antigravity", "workspace-write").contains(&"--mode=accept-edits"));
     }
 }
