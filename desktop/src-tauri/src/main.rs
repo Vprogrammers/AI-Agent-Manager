@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use tauri::Manager;
 mod project_architect;
 mod approval;
+mod codex_app_server;
 mod interactive;
 
 fn configure_agent_path() {
@@ -427,7 +428,7 @@ fn decide_agent_approval(approvals: tauri::State<'_, approval::ApprovalRegistry>
 // Single execution contract for all five providers. The legacy AAM engine
 // remains the transport for Claude/Codex until its event protocol is migrated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExecutionAdapter { Engine, SandboxedCli }
+enum ExecutionAdapter { Engine, CodexAppServer, SandboxedCli }
 
 #[derive(Clone, Copy, Debug)]
 struct ProviderAdapter {
@@ -437,7 +438,7 @@ struct ProviderAdapter {
 
 const PROVIDER_ADAPTERS: [ProviderAdapter; 5] = [
     ProviderAdapter { id: "claude", transport: ExecutionAdapter::Engine },
-    ProviderAdapter { id: "codex", transport: ExecutionAdapter::Engine },
+    ProviderAdapter { id: "codex", transport: ExecutionAdapter::CodexAppServer },
     ProviderAdapter { id: "antigravity", transport: ExecutionAdapter::SandboxedCli },
     ProviderAdapter { id: "opencode", transport: ExecutionAdapter::SandboxedCli },
     ProviderAdapter { id: "copilot", transport: ExecutionAdapter::SandboxedCli },
@@ -459,6 +460,7 @@ fn validate_execution(adapter: ProviderAdapter, permission: &str) -> Result<(), 
         ExecutionAdapter::Engine => {
             aam_executable().map(|_| ()).map_err(|_| "AAM engine unavailable".into())
         },
+        ExecutionAdapter::CodexAppServer => Ok(()),
         ExecutionAdapter::SandboxedCli => external_provider_preflight(adapter.id, permission),
     }
 }
@@ -477,7 +479,7 @@ mod adapter_contract_tests {
     #[test]
     fn engine_and_sandbox_transports_are_explicit() {
         assert_eq!(provider_adapter("claude").unwrap().transport, ExecutionAdapter::Engine);
-        assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::Engine);
+        assert_eq!(provider_adapter("codex").unwrap().transport, ExecutionAdapter::CodexAppServer);
         for id in ["antigravity", "opencode", "copilot"] {
             assert_eq!(provider_adapter(id).unwrap().transport, ExecutionAdapter::SandboxedCli);
         }
@@ -1228,6 +1230,8 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
     let result = match adapter.transport {
         ExecutionAdapter::Engine =>
             run_engine_adapter(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
+        ExecutionAdapter::CodexAppServer =>
+            codex_app_server::run(app, request_id, root, prompt, permission, stop.clone()).await,
         ExecutionAdapter::SandboxedCli =>
             run_external_provider(app, request_id, root, adapter.id, prompt, permission, stop.clone()).await,
     };
