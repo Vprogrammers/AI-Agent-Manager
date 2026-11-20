@@ -1205,6 +1205,31 @@ async fn execute_adapter(app: &tauri::AppHandle, request_id: &str, root: &Path, 
     result
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StagedAttachment { name: String, path: String, size: u64, kind: String }
+
+#[tauri::command]
+fn stage_prompt_attachment(root: String, source: String) -> Result<StagedAttachment, String> {
+    let workspace = Path::new(&root).canonicalize().map_err(|e| format!("Workspace: {e}"))?;
+    if !workspace.is_dir() || !workspace.join(".git").exists() { return Err("Select a Git workspace first".into()); }
+    let source = Path::new(&source).canonicalize().map_err(|e| format!("Attachment: {e}"))?;
+    if !source.is_file() { return Err("Attachment must be a regular file".into()); }
+    let name = source.file_name().and_then(|v| v.to_str()).ok_or("Invalid attachment name")?.to_string();
+    let extension = source.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+    let kind = if ["png","jpg","jpeg","webp"].contains(&extension.as_str()) { "image" }
+        else if ["pdf","txt","md","json","yaml","yml","xml","csv","kt","kts","swift","ts","tsx","js","jsx","py","rs","java","go","html","css","sh","toml"].contains(&extension.as_str()) { "document" }
+        else { return Err("Unsupported attachment format".into()); };
+    let size = source.metadata().map_err(|e| e.to_string())?.len();
+    if size == 0 || size > 20 * 1024 * 1024 { return Err("Attachment must be between 1 byte and 20 MiB".into()); }
+    let folder = workspace.join(".git").join("ai-agent-manager").join("attachments");
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let unique = format!("{}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos(), name);
+    let target = folder.join(unique);
+    std::fs::copy(&source, &target).map_err(|e| format!("Cannot stage attachment: {e}"))?;
+    Ok(StagedAttachment { name, path: target.to_string_lossy().into_owned(), size, kind: kind.into() })
+}
+
 #[tauri::command]
 async fn run_prompt(app: tauri::AppHandle, request_id: String, root: String, provider: String, prompt: String, permission: String) -> Result<(), String> {
     let end_to_end_started = std::time::Instant::now();
@@ -1422,6 +1447,6 @@ fn clear_agent_session(state: tauri::State<'_, RunningRequests>, root: String) -
 fn main() {
     configure_agent_path();
     tauri::Builder::default().manage(RunningRequests::default()).manage(LoginSession::default())
-        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![relevant_prompt_files, clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
+        .manage(ProviderCooldowns::default()).plugin(tauri_plugin_dialog::init()).invoke_handler(tauri::generate_handler![stage_prompt_attachment, relevant_prompt_files, clear_agent_session, run_prompt, github_repositories, github_clone, project_ai_config, desktop_diagnostics, provider_setup_status, node_setup_status, install_node_runtime, install_provider_cli, open_provider_login, login_pty_write, focus_after_login, cancel_provider_login, cancel_prompt, architect_preview, architect_apply])
         .run(tauri::generate_context!()).expect("Tauri application failed");
 }
