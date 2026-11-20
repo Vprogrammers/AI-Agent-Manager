@@ -5,6 +5,8 @@ use tauri::Manager;
 mod project_architect;
 mod approval;
 mod codex_app_server;
+#[cfg(unix)]
+mod hook_approval;
 mod interactive;
 
 fn configure_agent_path() {
@@ -992,6 +994,15 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
     let args = [provider, "--root", root_arg, "--desktop-jsonl", "--ui", "classic", "--prompt", prompt];
     let mut child = sandbox_command(&executable, &args, root, permission, provider).map_err(|e| format!("PRESTART: {e}"))?;
     child.env("AAM_PERMISSION_MODE", permission);
+    #[cfg(unix)]
+    let hook_gateway = if provider == "claude" && permission != "full-access" {
+        Some(hook_approval::HookGateway::start(app, request_id)?)
+    } else { None };
+    #[cfg(unix)]
+    if let Some(ref gateway) = hook_gateway {
+        child.env("AAM_APPROVAL_SOCKET", &gateway.path);
+        child.env("AAM_APPROVAL_TOKEN", &gateway.token);
+    }
     if provider == "claude" {
         child.env("AAM_DESKTOP_STREAM", "1");
         // Claude's interactive claude.ai login can be overridden by stale API
@@ -1062,6 +1073,7 @@ async fn run_engine_adapter(app: &tauri::AppHandle, request_id: &str, root: &Pat
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
+    app.state::<approval::ApprovalRegistry>().cancel_request(request_id);
     let stderr = if result.is_err() { stderr_task.abort(); String::new() } else { tokio::time::timeout(std::time::Duration::from_secs(2), stderr_task).await.ok().and_then(Result::ok).unwrap_or_default() };
     if reported_limit || classify_agent_error(&stderr) == "rate_limit" {
         set_provider_cooldown(provider, &app.state::<ProviderCooldowns>());
