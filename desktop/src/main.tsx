@@ -272,6 +272,50 @@ function App() {
   const [busy, setBusy] = React.useState(false);
   const [approval, setApproval] = React.useState<{id:string;requestId:string;provider:string;description:string;command?:string}|null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = React.useState(false);
+  // Interactive CLI is a real PTY, not a synthetic Approve/Deny dialog.
+  // Provider-owned permission questions remain in the same CLI process.
+  const [terminalSession, setTerminalSession] = React.useState<string | null>(null);
+  const [terminalText, setTerminalText] = React.useState('');
+  const [terminalInput, setTerminalInput] = React.useState('');
+  const [terminalBusy, setTerminalBusy] = React.useState(false);
+  const [terminalProvider, setTerminalProvider] = React.useState('');
+  React.useEffect(() => {
+    let active = true;
+    const unlisten = listen<{requestId:string;text:string;finished:boolean}>('interactive-cli-output', event => {
+      if (!active || event.payload.requestId !== terminalSession) return;
+      if (event.payload.text) setTerminalText(previous => (previous + event.payload.text).slice(-150000));
+      if (event.payload.finished) setTerminalBusy(false);
+    });
+    return () => { active = false; void unlisten.then(stop => stop()); };
+  }, [terminalSession]);
+  const startTerminal = async () => {
+    if (!root || terminalBusy || busy) return;
+    if (provider === 'auto' || provider === 'balanced') {
+      setError('Choose a specific provider for its interactive CLI.');
+      return;
+    }
+    if (permission !== 'full-access') {
+      setError('Interactive CLI currently requires explicit Full access. It cannot enforce workspace sandbox permissions.');
+      return;
+    }
+    const requestId = crypto.randomUUID();
+    setTerminalSession(requestId);
+    setTerminalProvider(provider);
+    setTerminalText('');
+    setTerminalBusy(true);
+    try {
+      await invoke('start_interactive_cli',{requestId,provider,root,permission});
+    } catch (e) {
+      setTerminalBusy(false);
+      setError(String(e));
+    }
+  };
+  const sendTerminal = async (input: string) => {
+    if (!terminalSession || !terminalBusy) return;
+    try { await invoke('interactive_cli_input',{requestId:terminalSession,input}); }
+    catch(e){setError(String(e));}
+  };
+
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
   React.useEffect(() => { if (startedAt === null) return; const id = window.setInterval(() => setElapsed(Math.floor((Date.now()-startedAt)/1000)), 1000); return () => window.clearInterval(id); }, [startedAt]);
@@ -633,7 +677,28 @@ function App() {
         <button className="clear-usage" disabled={busy||usageHistory.length===0} onClick={()=>{if(window.confirm('Clear desktop usage history for this workspace?')){localStorage.removeItem(USAGE_PREFIX+root);setUsageHistory([]);}}}>Clear desktop history</button>
       </>}
     </div></aside>
-    <main>{approval&&<section role="alertdialog" aria-modal="true" aria-labelledby="agent-approval-title" style={{padding:20,border:'2px solid #d9a441',margin:16,borderRadius:8,background:'#1b222b'}}>
+    <main>
+    <section aria-label="Native interactive agent terminal" style={{margin:'12px 16px',padding:12,border:'1px solid #54677a',borderRadius:8}}>
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        <strong>Native CLI · interactive permissions</strong>
+        <button type="button" disabled={busy||terminalBusy||!root||provider==='auto'||provider==='balanced'||permission!=='full-access'} onClick={()=>void startTerminal()}>Open {provider} CLI</button>
+        {terminalBusy&&<button type="button" onClick={()=>void invoke('interrupt_interactive_cli',{requestId:terminalSession}).catch(e=>setError(String(e)))}>Interrupt (Ctrl+C)</button>}
+      </div>
+      <p className="hint">Runs the original CLI with its own approval prompts and session. Select a specific agent and Full access explicitly. This terminal is not OS-sandboxed; review every command before approving. The standard prompt runner remains separate.</p>
+      {terminalSession&&<>
+        <p className="hint">{terminalProvider} · {terminalBusy?'Running':'Exited'}</p>
+        <pre aria-label="Interactive CLI output" role="log" style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:350,overflowY:'auto',background:'#101820',padding:12,borderRadius:6}}>{terminalText.replace(/\\x1b\\[[0-?]*[ -/]*[@-~]/g,'').replace(/\\x1b\\][^\\x07]*(?:\\x07|\\x1b\\\\)/g,'')}</pre>
+        <form onSubmit={e=>{e.preventDefault();void sendTerminal(terminalInput+'\\r');setTerminalInput('');}} style={{display:'flex',gap:8}}>
+          <input aria-label="Interactive CLI input" placeholder="Type response to the CLI prompt" value={terminalInput} disabled={!terminalBusy} onChange={e=>setTerminalInput(e.target.value)} onKeyDown={e=>{
+            if(e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight'){
+              e.preventDefault();void sendTerminal(({ArrowUp:'\\x1b[A',ArrowDown:'\\x1b[B',ArrowLeft:'\\x1b[D',ArrowRight:'\\x1b[C'} as Record<string,string>)[e.key]);
+            }
+          }}/>
+          <button type="submit" disabled={!terminalBusy}>Send</button>
+        </form>
+      </>}
+    </section>
+    {approval&&<section role="alertdialog" aria-modal="true" aria-labelledby="agent-approval-title" style={{padding:20,border:'2px solid #d9a441',margin:16,borderRadius:8,background:'#1b222b'}}>
       <h3 id="agent-approval-title">Agent permission required · {approval.provider}</h3>
       <p style={{whiteSpace:'pre-wrap'}}>{approval.description}</p>
       {approval.command&&<pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{approval.command}</pre>}
