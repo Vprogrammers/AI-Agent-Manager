@@ -70,7 +70,7 @@ pub async fn run(
                 return Err(format!("Codex app-server rejected request: {}", error.get("message").and_then(Value::as_str).unwrap_or("unknown error")));
             }
             let id = &message["id"];
-            if id == 0 {
+            if id == 0 && message.get("method").is_none() {
                 send(&mut stdin, json!({"method":"initialized","params":{}})).await?;
                 send(&mut stdin, json!({"id":1,"method":"thread/start","params":{
                     "cwd":root.to_string_lossy(),
@@ -78,7 +78,7 @@ pub async fn run(
                     // Outer Seatbelt/bwrap sandbox remains authoritative.
                     "sandbox": if permission == "full-access" {"danger-full-access"} else {"workspace-write"}
                 }})).await?;
-            } else if id == 1 {
+            } else if id == 1 && message.get("method").is_none() {
                 let thread = message.pointer("/result/thread/id").and_then(Value::as_str)
                     .ok_or("Codex did not return a thread ID")?.to_owned();
                 thread_id = Some(thread.clone());
