@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 struct Session {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send>,
 }
 #[derive(Default)]
 pub struct InteractiveSessions(Mutex<HashMap<String, Session>>);
@@ -149,12 +150,12 @@ pub fn start_interactive_cli(
     cmd.cwd(&workspace);
     // Do not inject bypass flags or non-interactive -p flags: the CLI owns its
     // permission prompts, and this process remains alive while the user decides.
-    let mut child = pty.slave.spawn_command(cmd)
+    let child = pty.slave.spawn_command(cmd)
         .map_err(|e| format!("CLI failed to start: {e}"))?;
     drop(pty.slave);
     let writer = pty.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pty.master.try_clone_reader().map_err(|e| e.to_string())?;
-    guard.insert(request_id.clone(), Session { writer, master: pty.master });
+    guard.insert(request_id.clone(), Session { writer, master: pty.master, child });
     drop(guard);
     let app_clone = app.clone();
     std::thread::spawn(move || {
@@ -171,9 +172,12 @@ pub fn start_interactive_cli(
                 }
             }
         }
-        let _ = child.wait();
         if let Some(state) = app_clone.try_state::<InteractiveSessions>() {
-            if let Ok(mut entries) = state.0.lock() { entries.remove(&request_id); }
+            if let Ok(mut entries) = state.0.lock() {
+                if let Some(mut session) = entries.remove(&request_id) {
+                    let _ = session.child.wait();
+                }
+            }
         }
         let _ = app.emit("interactive-cli-output", TerminalEvent {
             request_id, text: String::new(), finished: true,
@@ -193,6 +197,20 @@ pub fn interactive_cli_input(
     let session = entries.get_mut(&request_id).ok_or("Terminal is not running")?;
     session.writer.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
     session.writer.flush().map_err(|e| e.to_string())
+}
+
+/// Explicitly terminate and reap a native session. Hiding the terminal is NOT
+/// equivalent to closing it; callers must use this command to stop execution.
+#[tauri::command]
+pub fn close_interactive_cli(
+    sessions: tauri::State<'_, InteractiveSessions>,
+    request_id: String,
+) -> Result<(), String> {
+    let mut guard = sessions.0.lock().map_err(|_| "Terminal state unavailable")?;
+    let mut session = guard.remove(&request_id).ok_or("Terminal is not running")?;
+    session.child.kill().map_err(|e| format!("Cannot terminate CLI: {e}"))?;
+    let _ = session.child.wait();
+    Ok(())
 }
 
 #[tauri::command]
