@@ -97,11 +97,15 @@ pub async fn run(app: &AppHandle, request_id: &str, root: &Path, provider: &str,
                         .or_else(|| params.pointer("/toolCall/title").and_then(Value::as_str))
                         .unwrap_or("Agent requests permission to run a tool");
                     let command = params.pointer("/toolCall/rawInput").map(Value::to_string);
-                    let receiver = approvals.register(approval_id.clone(), request_id.to_owned())?;
-                    emit(app, request_id, json!({"kind":"approval_request","provider":provider,
-                        "approvalId":approval_id,"description":description,"command":command}));
-                    let allowed = tokio::time::timeout(Duration::from_secs(120), receiver)
-                        .await.ok().and_then(Result::ok).unwrap_or(false);
+                    let allowed = if permission == "full-access" {
+                        true // Explicitly selected by the user in the left panel.
+                    } else {
+                        let receiver = approvals.register(approval_id.clone(), request_id.to_owned())?;
+                        emit(app, request_id, json!({"kind":"approval_request","provider":provider,
+                            "approvalId":approval_id,"description":description,"command":command}));
+                        tokio::time::timeout(Duration::from_secs(120), receiver)
+                            .await.ok().and_then(Result::ok).unwrap_or(false)
+                    };
                     send(&mut stdin, json!({"jsonrpc":"2.0","id":id,"result":option(params, allowed)})).await?;
                 } else if !id.is_null() {
                     send(&mut stdin, json!({"jsonrpc":"2.0","id":id,"error":{
