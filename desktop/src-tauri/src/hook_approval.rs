@@ -2,7 +2,7 @@
 //! documented hook protocol; a request-scoped local socket forwards the choice
 //! to ApprovalRegistry and returns that decision to the SAME CLI process.
 #![cfg(unix)]
-use std::{fs, io::{Read, Write}, os::unix::net::{UnixListener, UnixStream},
+use std::{fs, io::{BufRead, BufReader, Read, Write}, os::unix::net::{UnixListener, UnixStream},
     path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}},
     thread, time::Duration};
 use serde_json::{json, Value};
@@ -23,8 +23,12 @@ fn secret() -> Result<String, String> {
 fn handle(mut socket: UnixStream, app: AppHandle, request_id: String, token: String, sequence: Arc<AtomicU64>) {
     let _ = socket.set_read_timeout(Some(Duration::from_secs(125)));
     let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
-    let mut buffer = vec![0u8; 65_536];
-    let n = match socket.read(&mut buffer) { Ok(0) | Err(_) => return, Ok(n) => n };
+    // NDJSON can arrive in multiple reads; never assume one read is a frame.
+    let mut buffer = Vec::new();
+    let n = match BufReader::new(&socket).take(65_537).read_until(b'\\n', &mut buffer) {
+        Ok(n) if n > 0 && n <= 65_536 && buffer.last() == Some(&b'\\n') => n,
+        _ => return,
+    };
     let parsed: Value = match serde_json::from_slice(&buffer[..n]) { Ok(v) => v, Err(_) => return };
     if parsed.get("token").and_then(Value::as_str) != Some(token.as_str()) { return; }
     let tool = parsed.get("tool").and_then(Value::as_str).unwrap_or("tool");
