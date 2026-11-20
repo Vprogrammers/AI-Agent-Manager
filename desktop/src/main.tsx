@@ -7,6 +7,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import './style.css';
 import AgentSetupWizard from './AgentSetupWizard';
+import { validateAttachment, type PromptAttachment } from './promptAttachments';
 import { analyzePrompt, recommendedStrategy, emptyFeedback, promptDiff, validateSuggestion, estimateTokens, type Agent, type Strategy, type Feedback } from './promptOptimizer';
 
 function MarkdownAnswer({ text }: { text: string }) {
@@ -221,6 +222,23 @@ function App() {
   const [recent, setRecent] = React.useState<string[]>(savedWorkspaces);
   const [provider, setProvider] = React.useState<RoutingMode>('auto');
   const [prompt, setPrompt] = React.useState('');
+  const [attachments, setAttachments] = React.useState<PromptAttachment[]>([]);
+  const addAttachments = async () => {
+    if (!root || busy) return;
+    try {
+      const selected = await open({multiple:true, directory:false, title:'Attach files to prompt'});
+      if (!selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      const staged: PromptAttachment[] = [...attachments];
+      for (const path of paths) {
+        const item = await invoke<PromptAttachment>('stage_prompt_attachment',{root,source:path});
+        const issue = validateAttachment(item,staged);
+        if (issue) { setError(`${item.name}: ${issue}`); continue; }
+        staged.push(item);
+      }
+      setAttachments(staged);
+    } catch (e) { setError(`Cannot attach file: ${String(e)}`); }
+  };
   const [messages, setMessages] = React.useState<Message[]>([]);
   React.useEffect(() => {
     if (!root) return;
@@ -355,11 +373,11 @@ function App() {
   };
   const submitPrompt = () => {
     const original=prompt.trim();
-    if(!original||busy||!root.trim())return;
+    if((!original && !attachments.length)||busy||!root.trim())return;
     if(original==='/clear'||original==='/new'){void clearSession();return;}
     const chosen=recommendedStrategy(feedback);
     setStrategy(chosen);setPendingPrompt(original);
-    setSuggestedPrompt(analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion);
+    setSuggestedPrompt(original ? analyzePrompt(original,[],[],chosen,messages.length>0,agentType,previousRequest,maxExtraTokens).suggestion : 'Review the attached files.');
   };
   const regenerateSuggestion = () => {
     if(!pendingPrompt)return;
@@ -367,15 +385,17 @@ function App() {
     trackOptimizer('regenerated');setStrategy(next);
   };
   const send = async (approvedText?: string) => {
-    const text = (approvedText ?? prompt).trim();
+    const originalText = (approvedText ?? prompt).trim();
+    const attachmentContext = attachments.length ? '\n\nAttached files (read these exact paths before answering):\n' + attachments.map(a => `- ${a.name} (${a.kind}): ${a.path}`).join('\n') : '';
+    const text = originalText + attachmentContext;
     if (text === '/clear' || text === '/new') { await clearSession(); return; }
-    if (!text || !root.trim() || busy) return;
+    if (!originalText && !attachments.length || !root.trim() || busy) return;
     const id = String(++requestSeq.current);
     const requestedProvider = provider;
     const requestRoot = root;
     if (permission === 'full-access' && !window.confirm('Full access allows the agent to execute commands and modify files outside the workspace without normal sandbox protection. Continue for this request?')) return;
     if(pendingPrompt) setOptimizerMetrics(prev=>({...prev,runs:prev.runs+1,addedEstimate:prev.addedEstimate+estimateTokens(text)-estimateTokens(pendingPrompt)}));
-    setPrompt(''); setPendingPrompt(null); setSuggestedPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
+    setPrompt(''); setAttachments([]); setPendingPrompt(null); setSuggestedPrompt(''); setError(''); setLimitNotice(''); setUsage('Waiting for provider'); setLastUsage({});
     setLastProvider(requestedProvider); setActivity('Starting agent…'); setLiveText(''); setLiveProvider(requestedProvider === 'codex' ? 'codex' : 'claude');
     setBusy(true); setStartedAt(Date.now()); setElapsed(0); setPendingSwitch(false);
     setMessages(m => [...m, { role: 'user', text, provider: requestedProvider === 'codex' ? 'codex' : 'claude' }]);
@@ -594,7 +614,7 @@ function App() {
 <button disabled={busy} onClick={()=>{trackOptimizer('rejected');void send(pendingPrompt);}}>Reject & send original</button>
 <button disabled={busy} onClick={()=>{setPendingPrompt(null);setSuggestedPrompt('');}}>Cancel</button>
 </div><p className="hint">Local usage: {optimizerMetrics.runs} submitted · ~{optimizerMetrics.addedEstimate} net added tokens (estimate, not savings). Feedback: {feedback.approved} accepted · {feedback.edited} edited · {feedback.rejected} rejected. No prompt text stored in feedback.</p>
-</div>}<textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Antigravity" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Antigravity" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
+</div>}<div className="prompt-attachments"><button type="button" disabled={busy||!root} onClick={()=>void addAttachments()}>+ Attach files</button>{attachments.map(a=><span key={a.path} className="attachment-chip">{a.name} <button type="button" aria-label={`Remove ${a.name}`} onClick={()=>setAttachments(items=>items.filter(v=>v.path!==a.path))}>×</button></span>)}</div><textarea aria-label="Prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submitPrompt();}}} placeholder={busy ? `Working with ${liveProvider === "antigravity" ? "Antigravity" : liveProvider.charAt(0).toUpperCase() + liveProvider.slice(1)}…` : provider === "auto" ? "Ask an agent (Auto)…" : provider === "balanced" ? "Ask an agent (Balanced)…" : `Ask ${provider === "antigravity" ? "Antigravity" : provider === "opencode" ? "OpenCode" : provider === "copilot" ? "Copilot" : provider.charAt(0).toUpperCase() + provider.slice(1)}…`}/>{busy&&<button className="stop-button" disabled={stopping} onClick={()=>{setStopping(true);void invoke('cancel_prompt',{requestId:String(requestSeq.current)}).catch(e=>setError(String(e)));}}>{stopping?'Stopping…':'Stop'}</button>}<button className={`send-button ${busy ? liveProvider : provider}`} disabled={busy||!root.trim()||!prompt.trim()||diagnostics.some(d=>d.name==='Git'&&d.status==='missing')} onClick={submitPrompt}>{busy?'Running…':'Send →'}</button></footer></main>
   </div>;
 }
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
