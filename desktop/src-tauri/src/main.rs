@@ -803,6 +803,11 @@ fn route_candidates(prompt: &str, mode: &str, permission: &str) -> Vec<&'static 
     } else {
         vec!["claude", "codex", "antigravity", "opencode", "copilot"]
     };
+    // Auto prefers Claude for all tasks. Explicit provider selection still takes precedence;
+    // Balanced retains its own ordering. Codex is a fallback, not the default coding agent.
+    let ordered = if mode == "auto" && explicit.is_none() {
+        std::iter::once("claude").chain(ordered.into_iter().filter(|id| *id != "claude")).collect::<Vec<_>>()
+    } else { ordered };
     ordered.into_iter().filter(|id|
         permission == "workspace-write" || ["claude", "codex"].contains(id)
     ).collect()
