@@ -371,7 +371,7 @@ function App() {
     messagesEnd.current?.scrollIntoView({ block: 'end', behavior: 'instant' });
     const steps = stepsListRef.current;
     if (steps) steps.scrollTop = steps.scrollHeight;
-  }, [messages, liveText, agentSteps, activity, showSteps]);
+  }, [messages, liveText, agentSteps, activity, showSteps, approval]);
   const [githubOpen, setGithubOpen] = React.useState(false);
   const [repositories, setRepositories] = React.useState<GithubRepo[]>([]);
   const [repoFilter, setRepoFilter] = React.useState('');
