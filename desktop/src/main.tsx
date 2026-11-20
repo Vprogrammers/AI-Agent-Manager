@@ -275,6 +275,7 @@ function App() {
   const [approvalSubmitting, setApprovalSubmitting] = React.useState(false);
   const [terminalSession, setTerminalSession] = React.useState<string | null>(null);
   const [terminalBusy, setTerminalBusy] = React.useState(false);
+  const [terminalExpanded, setTerminalExpanded] = React.useState(true);
   const [terminalProvider, setTerminalProvider] = React.useState<Provider>('claude');
   const [terminalPrompt, setTerminalPrompt] = React.useState('');
   const [terminalRoot, setTerminalRoot] = React.useState('');
@@ -292,9 +293,20 @@ function App() {
       setTerminalPrompt(initialPrompt);
       setTerminalSession(crypto.randomUUID());
       setTerminalBusy(true);
+      setTerminalExpanded(true);
       setError('');
       return true;
     } catch (error) { setError(String(error)); return false; }
+  };
+  const closeTerminal = async () => {
+    if (!terminalSession) return;
+    if (terminalBusy && !window.confirm('Terminate the running agent session? Unsaved CLI work may be interrupted.')) return;
+    try {
+      if (terminalBusy) await invoke('close_interactive_cli', {requestId:terminalSession});
+      setTerminalBusy(false);
+      setTerminalSession(null);
+      setTerminalExpanded(false);
+    } catch (error) { setError(String(error)); }
   };
   const [startedAt, setStartedAt] = React.useState<number | null>(null);
   const [elapsed, setElapsed] = React.useState(0);
@@ -427,9 +439,8 @@ function App() {
     } catch (e) { setError('Cannot clear session: ' + String(e)); }
   };
   const submitPrompt = () => {
-    if (terminalBusy) return;
     const original=prompt.trim();
-    if((!original && !attachments.length)||busy||terminalBusy||!root.trim())return;
+    if((!original && !attachments.length)||busy||!root.trim())return;
     if(original==='/clear'||original==='/new'){void clearSession();return;}
     const chosen=recommendedStrategy(feedback);
     setStrategy(chosen);setPendingPrompt(original);
@@ -446,7 +457,14 @@ function App() {
     const text = originalText + attachmentContext;
     if (text === '/clear' || text === '/new') { await clearSession(); return; }
     if (!originalText && !attachments.length || !root.trim() || busy) return;
-    if (terminalBusy) { setError('The interactive CLI is already running. Continue in its terminal.'); return; }
+    if (terminalBusy && terminalSession) {
+      try {
+        await invoke('interactive_cli_input', {requestId:terminalSession,input:text+'\\r'});
+        setTerminalExpanded(true);
+        setPendingPrompt(null); setSuggestedPrompt(''); setPrompt(''); setAttachments([]);
+      } catch (error) { setError(String(error)); }
+      return;
+    }
     if (await startTerminal(text)) {
       setPendingPrompt(null); setSuggestedPrompt(''); setPrompt(''); setAttachments([]);
     }
@@ -521,16 +539,22 @@ function App() {
       </>}
     </div></aside>
     <main>
-    <section aria-label="Native CLI" style={{margin:'12px 16px',border:'1px solid #54677a',borderRadius:8}}>
-      <div style={{padding:12,display:'flex',alignItems:'center',gap:10}}>
+    <section aria-label="Native CLI" className="native-terminal-panel">
+      <div className="native-terminal-toolbar">
         <strong>Interactive CLI</strong>
-        <button type="button" disabled={busy||terminalBusy||!root} onClick={()=>void startTerminal()}>Open {provider} terminal</button>
-        <small>Provider-native approval menus; approved permission level from left panel applies to this session.</small>
+        <span className="hint">{terminalSession ? `${terminalProvider} · ${terminalBusy ? 'Running' : 'Finished'}` : 'Not started'}</span>
+        <div className="native-terminal-controls">
+          {terminalSession && <button type="button" onClick={()=>setTerminalExpanded(expanded=>!expanded)} aria-expanded={terminalExpanded} aria-controls="native-cli-content">{terminalExpanded?'Hide terminal':'Show terminal'}</button>}
+          {terminalSession && <button type="button" onClick={()=>void closeTerminal()}>{terminalBusy?'Stop & close':'Close'}</button>}
+          {!terminalSession && <button type="button" disabled={busy||!root} onClick={()=>void startTerminal()}>Open terminal</button>}
+        </div>
       </div>
-      {terminalSession&&<InteractiveTerminal key={terminalSession} requestId={terminalSession}
-        provider={terminalProvider} root={terminalRoot} permission={terminalPermission}
-        initialPrompt={terminalPrompt} onFinish={()=>setTerminalBusy(false)}
-        onError={setError}/>}
+      {terminalSession && <div id="native-cli-content" style={{display:terminalExpanded?'block':'none'}}>
+        <InteractiveTerminal key={terminalSession} requestId={terminalSession}
+          provider={terminalProvider} root={terminalRoot} permission={terminalPermission}
+          initialPrompt={terminalPrompt} onFinish={()=>setTerminalBusy(false)}
+          onError={setError}/>
+      </div>}
     </section>
     {approval&&<section role="alertdialog" aria-modal="true" aria-labelledby="agent-approval-title" style={{padding:20,border:'2px solid #d9a441',margin:16,borderRadius:8,background:'#1b222b'}}>
       <h3 id="agent-approval-title">Agent permission required · {approval.provider}</h3>
