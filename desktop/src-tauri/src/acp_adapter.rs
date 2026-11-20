@@ -70,11 +70,11 @@ pub async fn run(app: &AppHandle, request_id: &str, root: &Path, provider: &str,
                     error.get("message").and_then(Value::as_str).unwrap_or("request rejected")));
             }
             let id = &value["id"];
-            if id == 1 {
+            if id == 1 && value.get("method").is_none() {
                 send(&mut stdin, json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{
                     "cwd":root.to_string_lossy(),"mcpServers":[]
                 }})).await?;
-            } else if id == 2 {
+            } else if id == 2 && value.get("method").is_none() {
                 let sid = value.pointer("/result/sessionId").and_then(Value::as_str)
                     .ok_or("ACP agent did not create a session")?.to_owned();
                 session = Some(sid.clone());
@@ -121,7 +121,7 @@ pub async fn run(app: &AppHandle, request_id: &str, root: &Path, provider: &str,
                             "event":{"type":"acp.update","detail":kind}}));
                     }
                 }
-            } else if id == 3 {
+            } else if id == 3 && value.get("method").is_none() {
                 let reason = value.pointer("/result/stopReason").and_then(Value::as_str).unwrap_or("unknown");
                 if reason != "end_turn" {
                     return Err(format!("{provider} ACP turn stopped: {reason}"));
