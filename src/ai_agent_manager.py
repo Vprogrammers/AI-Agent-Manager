@@ -73,7 +73,7 @@ def permission_hook():
             "token": token,
             "tool": data.get("tool_name", "unknown"),
             "input": data.get("tool_input", {}),
-        }, ensure_ascii=False).encode("utf-8") + b"\\n"
+        }, ensure_ascii=False).encode("utf-8") + b"\n"
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(121)
             connection.connect(address)
